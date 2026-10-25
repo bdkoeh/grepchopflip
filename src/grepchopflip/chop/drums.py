@@ -60,7 +60,7 @@ from grepchopflip.errors import InputError
 
 log = logging.getLogger(__name__)
 
-CHOP_FORMAT_VERSION = "drums-2"
+CHOP_FORMAT_VERSION = "drums-3"   # drums-3: boundaries at the pre-attack minimum, not the 15 % point
 PARTS = ("kick", "snare", "toms", "hh", "ride", "crash")
 GRID_PARTS = ("kick", "snare")     # hits used to correct the downbeats (toms/crash snapped to fills; lead 2026-10-25)
 LOOP_BARS = (1, 2, 4)
@@ -81,6 +81,7 @@ QUIET_REL_DB = {"kick": -36.0, "snare": -36.0, "toms": -30.0, "hh": -26.0, "ride
 
 MIN_SLICE_MS = 30.0
 PREROLL_MS = 1.5            # the 1 ms fade-in plus margin finishes before the attack
+PRE_ATTACK_MS = 15.0        # look this far before the 15 % point for the envelope minimum (cut there)
 SNAP_SEARCH = 16            # samples (0.36 ms), so start stays within 2 ms of the attack
 FADE_IN_MS, FADE_OUT_MS = 1.0, 8.0
 NORMALIZE_DBFS = -1.0
@@ -134,6 +135,7 @@ def _settings(sensitivity: float) -> dict:
         "loop_fade_ms": LOOP_FADE_MS,
         "loop_length_tol": LOOP_LENGTH_TOL,
         "grid_window_s": GRID_WINDOW_S,
+        "pre_attack_ms": PRE_ATTACK_MS,
         "grid_consistency_min": GRID_CONSISTENCY_MIN,
         "ranking": RANKING,
     }
@@ -166,6 +168,17 @@ def _refine_start(absy: np.ndarray, env_fast: np.ndarray, onset: int, lo_bound: 
     while i > floor and env_fast[i - 1] < env_fast[i]:
         i -= 1
     return i
+
+
+def _pre_attack(env_fast: np.ndarray, attack: int, lo_bound: int, sr: int, max_ms: float = 15.0) -> int:
+    """Quiet point just before a hit: the envelope minimum in the `max_ms` before `attack`. Loop
+    boundaries and one-shot starts cut here, so the whole attack ramp (not just the part above 15 % of
+    peak) belongs to the hit that follows, never to the loop or slice before it."""
+    a = max(lo_bound, attack - int(max_ms / 1000 * sr), 0)
+    if attack <= a:
+        return attack
+    seg = env_fast[a:attack + 1]
+    return a + int(np.argmin(seg))
 
 
 def _moving_max(x: np.ndarray, size: int) -> np.ndarray:
@@ -204,18 +217,22 @@ def _chop_part(part: str, y: np.ndarray, sr: int, sensitivity: float,
 
     starts: list[int] = []
     attacks: list[int] = []
+    pre_attacks: list[int] = []
     prev_o = -10**9
     for o in onsets:
         lo_bound = max(0, prev_o + int(0.010 * sr)) if starts else 0
         a = _refine_start(absy, fast, int(o), lo_bound, sr)
-        s = common.zero_snap(y, max(0, a - int(PREROLL_MS / 1000 * sr)), search=SNAP_SEARCH)
+        q = _pre_attack(fast, a, lo_bound, sr, PRE_ATTACK_MS)
+        s = common.zero_snap(y, max(0, min(q, a - int(PREROLL_MS / 1000 * sr))), search=SNAP_SEARCH)
         starts.append(int(s))
         attacks.append(int(a))
+        pre_attacks.append(int(q))
         prev_o = int(o)
     # keep strictly increasing starts
     keep = [i for i in range(len(starts)) if i == 0 or starts[i] > starts[i - 1]]
     starts = [starts[i] for i in keep]
     attacks = [attacks[i] for i in keep]
+    pre_attacks = [pre_attacks[i] for i in keep]
     strength = strength[keep]
 
     cands: list[dict] = []
@@ -242,7 +259,7 @@ def _chop_part(part: str, y: np.ndarray, sr: int, sensitivity: float,
         pre_peak = float(absy[max(0, s - int(0.005 * sr)): s].max()) if s > 0 else 0.0
         att_peak = float(absy[s: s + int(0.015 * sr)].max())
         cands.append({
-            "start": s, "end": e, "attack": attacks[i], "mono": z, "raw_peak": peak,
+            "start": s, "end": e, "attack": attacks[i], "pre_attack": pre_attacks[i], "mono": z, "raw_peak": peak,
             "strength": float(strength[i]), "pre_ratio": pre_peak / peak, "attack_ratio": att_peak / peak,
         })
     if not cands:
@@ -279,7 +296,8 @@ def _chop_part(part: str, y: np.ndarray, sr: int, sensitivity: float,
 
 def _grid(analysis: dict, onsets_s: list[float]) -> dict:
     tracked = [float(x) for x in analysis.get("downbeats_s", [])]
-    corrected = common.corrected_downbeats(tracked, onsets_s, GRID_WINDOW_S, PREROLL_MS / 1000) \
+    # onsets_s are already pre-attack minima, so no extra pre-roll here
+    corrected = common.corrected_downbeats(tracked, onsets_s, GRID_WINDOW_S, 0.0) \
         if onsets_s else list(tracked)
     return {
         "downbeats_s_tracked": [round(x, 6) for x in tracked],
@@ -466,7 +484,7 @@ def chop_drums(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> 
             common.write_chop(out_dir / rpath, h["audio"], sr)
             att_s = h["attack"] / sr
             if part in GRID_PARTS:
-                grid_onsets.append(att_s)
+                grid_onsets.append(h["pre_attack"] / sr)   # loops cut at the quiet point before the hit
             beats = np.asarray(analysis.get("beats_s", []), dtype=float)
             dbs = np.asarray(analysis.get("downbeats_s", []), dtype=float)
             start_beat = bar = None
