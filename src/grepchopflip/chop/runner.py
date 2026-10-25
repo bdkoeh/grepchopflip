@@ -208,7 +208,14 @@ def make_loops(job: Job, y: np.ndarray, sr: int, bars: tuple[int, ...], prefix: 
     dropped = 0
     counter: dict[int, int] = {}
     ana = job.analysis
-    shaky = ana.get("grid_source", "tracked") != "tracked" or float(ana.get("grid_consistency", 1.0) or 0.0) < 0.8
+    # same wording as the drum loops (drums.py gate) so both stems report grid trouble identically
+    grid_reasons: list[str] = []
+    if ana.get("grid_source", "tracked") != "tracked":
+        grid_reasons.append(f"grid_source={ana.get('grid_source')}")
+    consistency = float(ana.get("grid_consistency", 1.0) or 0.0)
+    if consistency < 0.8:
+        grid_reasons.append(f"grid_consistency={consistency:.2f}")
+    shaky = bool(grid_reasons)
     for s, e, n in bar_loops_for(job, dur, bars):
         if job.bpm:
             expect = n * job.beats_per_bar * 60.0 / job.bpm
@@ -235,7 +242,7 @@ def make_loops(job: Job, y: np.ndarray, sr: int, bars: tuple[int, ...], prefix: 
             start_beat=beat_position(job.beats_s, a / sr), length_beats=round((b - a) / sr / job.beat_s, 3),
             peak_dbfs=peak_dbfs(seg), rms_dbfs=rms_dbfs(seg), zero_snapped=True,
             fade_in_ms=LOOP_FADE_MS, fade_out_ms=LOOP_FADE_MS, needs_review=shaky,
-            extra={"grid_start_s": round(s, 6), "grid": job.grid_source},
+            extra={"grid_start_s": round(s, 6), "grid": job.grid_source, "review_reasons": list(grid_reasons)},
         )
         chops.append(stamp(job, c, a, b))
     return chops, dropped

@@ -16,7 +16,7 @@ from grepchopflip.chop.pitch import midi_to_name, pitch_stats
 
 log = logging.getLogger("grepchopflip.chop")
 
-ALGO = "bass-3"
+ALGO = "bass-4"
 MIN_CONFIDENCE = 0.35   # on the MEAN pyin voiced probability, which rarely exceeds 0.7 (Sade slices: valley at 0.1-0.3)
 MIN_LEN_S = 0.08
 PITCH_MIN_WINDOW_S = 0.25   # pitch is judged on at least this much of the stem from the slice start
@@ -88,6 +88,8 @@ def chop_bass(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False) -
         rel = f"chops/bass/oneshots/{name}.wav"
         write_chop(job.out_dir / rel, seg, sr)
         spread = st["spread_semitones"]
+        flagged = bool(spread is not None and spread > SPREAD_FLAG_SEMITONES)
+        reasons = [f"pitch_spread={spread:.2f}st"] if flagged else []
         c = Chop(
             id=name, stem="bass", part=None, kind="oneshot", source_start_s=round(a2 / sr, 6),
             source_end_s=round(b2 / sr, 6), path=rel, channels=seg.shape[1], sample_rate=sr,
@@ -95,9 +97,10 @@ def chop_bass(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False) -
             length_beats=round((b2 - a2) / sr / job.beat_s, 3),
             root_midi=midi, root_note=midi_to_name(midi), root_confidence=round(conf, 3),
             peak_dbfs=peak_dbfs(seg), rms_dbfs=rms_dbfs(seg),
-            needs_review=bool(spread is not None and spread > SPREAD_FLAG_SEMITONES),
+            needs_review=flagged,
             extra={"f0_hz": st["f0_hz"], "cents_off_root": round((st["midi_float"] - midi) * 100, 1),
-                   "pitch_spread_semitones": spread, "voiced_fraction": st["voiced_fraction"]},
+                   "pitch_spread_semitones": spread, "voiced_fraction": st["voiced_fraction"],
+                   "review_reasons": reasons},
         )
         runner.stamp(job, c, a2, b2)
         chops.append(c)

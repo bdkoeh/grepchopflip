@@ -60,3 +60,35 @@ def test_words_absent_is_skipped_with_hint(tmp_path, monkeypatch):
 @pytest.mark.skipif(not ww.available(), reason="extra `words` not installed")
 def test_words_cuda_libs_preload():
     assert isinstance(ww.preload_cuda_libs(), list)
+
+
+def test_low_confidence_words_record_their_reason(tmp_path, monkeypatch):
+    import sys
+    import types
+    from types import SimpleNamespace as NS
+
+    words = [NS(word=" hello", start=0.2, end=0.7, probability=0.43),
+             NS(word=" world", start=1.0, end=1.5, probability=0.91)]
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, *a, **k):
+            return [NS(words=words)], NS(language="en", language_probability=0.99)
+
+    fake = types.ModuleType("faster_whisper")
+    fake.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+    monkeypatch.setattr(ww, "available", lambda: True)
+    y = np.zeros(2 * SR, dtype=np.float32)
+    place(y, 0.2, tone(220.0, 0.5))
+    place(y, 1.0, tone(262.0, 0.5))
+    root = write_job(tmp_path, {"vocals": y}, 2.0)
+    ww.chop_words(root, force=True)
+    doc = json.loads((root / "chops/vocals/chops_words.json").read_text())
+    by_text = {c["extra"]["text"]: c for c in doc["chops"]}
+    assert by_text["hello"]["needs_review"] is True
+    assert by_text["hello"]["extra"]["review_reasons"] == ["low_word_confidence=0.43"]
+    assert by_text["world"]["needs_review"] is False
+    assert by_text["world"]["extra"]["review_reasons"] == []
