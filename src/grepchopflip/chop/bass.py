@@ -16,9 +16,11 @@ from grepchopflip.chop.pitch import midi_to_name, pitch_stats
 
 log = logging.getLogger("grepchopflip.chop")
 
-ALGO = "bass-2"
-MIN_CONFIDENCE = 0.5
+ALGO = "bass-3"
+MIN_CONFIDENCE = 0.35   # on the MEAN pyin voiced probability, which rarely exceeds 0.7 (Sade slices: valley at 0.1-0.3)
 MIN_LEN_S = 0.08
+PITCH_MIN_WINDOW_S = 0.25   # pitch is judged on at least this much of the stem from the slice start
+SPREAD_FLAG_SEMITONES = 1.5
 MAX_LEN_S = 3.0
 ONSET_DELTA = 0.04          # looser than the kick default (0.07): bass notes are legato
 MIN_INTERVAL_MS = 90.0
@@ -26,12 +28,23 @@ GATE_REL_DB = 40.0          # slices whose peak is this far below the stem peak 
 FMIN, FMAX = 30.0, 400.0
 
 
-def chop_bass(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, use_penn: bool = False) -> dict:
+def slice_pitch(y: np.ndarray, a: int, b: int, sr: int) -> dict:
+    """Pitch of the note starting at sample `a` (slice end `b`). Judged on the stem itself from `a` for at
+    least 0.25 s (short slices would otherwise leave pyin with too few frames), spread measured on the
+    middle 60 % of the slice proper."""
+    end = min(len(y), max(b, a + int(PITCH_MIN_WINDOW_S * sr)))
+    length = (b - a) / sr
+    return pitch_stats(y[a:end], sr, FMIN, FMAX, spread_range_s=(0.2 * length, 0.8 * length))
+
+
+def chop_bass(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False) -> dict:
     job = runner.load_job(out_dir, "bass", ["oneshots", "loops"])
     params = {"algo": ALGO, "sensitivity": sensitivity, "onset_delta": ONSET_DELTA,
               "min_interval_ms": MIN_INTERVAL_MS, "min_pitch_confidence": MIN_CONFIDENCE,
               "pitch": {"method": "librosa.pyin", "fmin": FMIN, "fmax": FMAX, "frame_length": 4096,
-                        "sr": 22050, "penn": use_penn},
+                        "sr": 22050},
+              "pitch_min_window_s": PITCH_MIN_WINDOW_S, "spread_flag_semitones": SPREAD_FLAG_SEMITONES,
+              "spread_window": "middle 60%", "confidence": "mean pyin voiced probability",
               "decay_floor_db": -40.0, "gate_rel_db": GATE_REL_DB, "loops_bars": [1, 2]}
     fp = runner.fingerprint(job, params)
     hit = runner.cached_summary(job, fp, force)
@@ -58,8 +71,8 @@ def chop_bass(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, u
         if stem_peak <= 0 or float(np.max(np.abs(seg_raw))) < stem_peak * 10 ** (-GATE_REL_DB / 20):
             rejected_quiet += 1
             continue
-        st = pitch_stats(seg_raw, sr, FMIN, FMAX, use_penn)
-        conf = st["voiced_fraction"]
+        st = slice_pitch(y, int(a), int(b), sr)
+        conf = st["voiced_prob"]
         if st["midi_float"] is None or conf < MIN_CONFIDENCE:
             rejected_pitch += 1
             continue
@@ -75,17 +88,19 @@ def chop_bass(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, u
         rel = f"chops/bass/oneshots/{name}.wav"
         write_chop(job.out_dir / rel, seg, sr)
         spread = st["spread_semitones"]
-        chops.append(Chop(
+        c = Chop(
             id=name, stem="bass", part=None, kind="oneshot", source_start_s=round(a2 / sr, 6),
             source_end_s=round(b2 / sr, 6), path=rel, channels=seg.shape[1], sample_rate=sr,
             start_beat=runner.beat_position(job.beats_s, a2 / sr),
             length_beats=round((b2 - a2) / sr / job.beat_s, 3),
             root_midi=midi, root_note=midi_to_name(midi), root_confidence=round(conf, 3),
             peak_dbfs=peak_dbfs(seg), rms_dbfs=rms_dbfs(seg),
-            needs_review=bool(spread is not None and spread > 1.0),
+            needs_review=bool(spread is not None and spread > SPREAD_FLAG_SEMITONES),
             extra={"f0_hz": st["f0_hz"], "cents_off_root": round((st["midi_float"] - midi) * 100, 1),
-                   "pitch_spread_semitones": spread, "penn_midi": st["penn_midi"]},
-        ))
+                   "pitch_spread_semitones": spread, "voiced_fraction": st["voiced_fraction"]},
+        )
+        runner.stamp(job, c, a2, b2)
+        chops.append(c)
     params["rejected"] = {"low_pitch_confidence": rejected_pitch, "too_short": rejected_short,
                           "too_quiet": rejected_quiet}
 

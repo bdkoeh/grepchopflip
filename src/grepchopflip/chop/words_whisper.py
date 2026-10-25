@@ -22,6 +22,7 @@ from grepchopflip.chop.common import (
     zero_snap,
 )
 from grepchopflip.chop.pitch import midi_to_name, pitch_stats
+from grepchopflip.errors import MissingDependencyError, SeparationError
 
 log = logging.getLogger("grepchopflip.chop")
 
@@ -45,7 +46,10 @@ def preload_cuda_libs() -> list[str]:
                                             "libcudnn_adv.so.9*", "libcudnn_engines_precompiled.so.9*",
                                             "libcudnn_engines_runtime_compiled.so.9*",
                                             "libcudnn_heuristic.so.9*", "libcudnn.so.9*"])):
-        spec = importlib.util.find_spec(pkg)
+        try:
+            spec = importlib.util.find_spec(pkg)   # raises ModuleNotFoundError when `nvidia` itself is absent
+        except (ImportError, ValueError):
+            spec = None
         if spec is None or not spec.submodule_search_locations:
             continue
         libdir = Path(list(spec.submodule_search_locations)[0]) / "lib"
@@ -75,9 +79,14 @@ def chop_words(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, 
     import librosa
 
     loaded = preload_cuda_libs()
-    from faster_whisper import WhisperModel
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as e:   # installed but broken (missing/incompatible ctranslate2 etc.)
+        raise MissingDependencyError(f"faster-whisper cannot be imported ({type(e).__name__}: {e}); "
+                                     "reinstall the extra: uv sync --extra words")
 
     y, sr = load_stem(job.stem_path)
+    job.sr = sr
     y = fold_mono_if_correlated(y)
     n = len(y)
     mono16 = librosa.resample(y.mean(axis=1), orig_sr=sr, target_sr=16000).astype(np.float32)
@@ -91,9 +100,12 @@ def chop_words(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, 
         notes.append(f"cuda float16 failed ({type(e).__name__}: {e}); used cpu int8")
         log.warning(notes[-1])
         device = "cpu"
-        wm = WhisperModel(model, device="cpu", compute_type="int8")
-        segments, info = wm.transcribe(mono16, word_timestamps=True, vad_filter=True, beam_size=5)
-        segs = list(segments)
+        try:
+            wm = WhisperModel(model, device="cpu", compute_type="int8")
+            segments, info = wm.transcribe(mono16, word_timestamps=True, vad_filter=True, beam_size=5)
+            segs = list(segments)
+        except Exception as e2:
+            raise SeparationError(f"word transcription failed on cuda and cpu: {type(e2).__name__}: {e2}")
     params["device_used"] = device
     params["language"] = info.language
     params["language_probability"] = round(float(info.language_probability), 3)
@@ -118,7 +130,7 @@ def chop_words(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, 
             rel = f"chops/vocals/words/{name}.wav"
             write_chop(job.out_dir / rel, out, sr)
             prev_end = b
-            chops.append(Chop(
+            chops.append(runner.stamp(job, Chop(
                 id=name, stem="vocals", part=None, kind="word", source_start_s=round(a / sr, 6),
                 source_end_s=round(b / sr, 6), path=rel, channels=out.shape[1], sample_rate=sr,
                 start_beat=runner.beat_position(job.beats_s, a / sr),
@@ -129,7 +141,7 @@ def chop_words(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, 
                 extra={"text": text, "probability": round(float(w.probability), 3),
                        "whisper_start_s": round(float(w.start), 3), "whisper_end_s": round(float(w.end), 3),
                        "source": "faster-whisper"},
-            ))
+            ), a, b))
     params["notes"] = notes
     log.info("words: %d word chops (%s)", len(chops), device)
     return runner.finish(job, chops, params, fp, "chop.words", "chops_words.json")

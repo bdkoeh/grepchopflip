@@ -189,6 +189,10 @@ class Chop:
     zero_snapped: bool = True
     fade_in_ms: float = 1.0
     fade_out_ms: float = 8.0
+    source_file: str | None = None      # e.g. stems/bass.wav (relative to the song folder)
+    source_sha256: str | None = None    # sha256 of that stem file
+    bit_depth: int | None = None
+    bar: int | None = None              # 0-based bar index on the downbeat grid
     extra: dict = field(default_factory=dict)
 
 

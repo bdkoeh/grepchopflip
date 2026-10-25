@@ -28,6 +28,28 @@ def job(tmp_path_factory):
     return root, expect
 
 
+def test_short_slice_pitch_uses_the_stem_beyond_the_slice():
+    from grepchopflip.chop.bass import slice_pitch
+    y = np.zeros(2 * SR, dtype=np.float32)
+    place(y, 0.5, tone(55.0, 1.0, decay=0.5))
+    a = int(0.5 * SR)
+    st = slice_pitch(y, a, a + int(0.1 * SR), SR)       # a 0.1 s slice of a longer A1
+    assert round(st["midi_float"]) == 33 and st["voiced_prob"] >= 0.5
+    assert st["spread_semitones"] is not None and st["spread_semitones"] < 1.5
+
+
+def test_records_carry_provenance(job):
+    root, _ = job
+    chop_bass(root, force=True)
+    doc = json.loads((root / "chops/bass/chops.json").read_text())
+    for c in doc["chops"]:
+        assert c["source_file"] == "stems/bass.wav" and len(c["source_sha256"]) == 64
+        assert c["bit_depth"] == 24 and c["bar"] is not None
+        assert c["extra"]["end_sample"] > c["extra"]["start_sample"]
+        assert c["path"].startswith("chops/bass/")
+    assert any(c["kind"] == "loop" and abs(c["length_beats"] - c["bars"] * 4) < 0.2 for c in doc["chops"])
+
+
 def test_midi_names():
     assert midi_to_name(30) == "F#1" and midi_to_name(60) == "C4" and midi_to_name(40) == "E2"
 

@@ -20,12 +20,12 @@ from grepchopflip.key import estimate_key_from_chroma
 
 log = logging.getLogger("grepchopflip.chop")
 
-ALGO = "melodic-2"
+ALGO = "melodic-3"
 CHROMA_SR = 22050
 CHROMA_HOP = 512
 ONSET_DELTA = 0.05
 MIN_INTERVAL_MS = 60.0
-CHROMA_SPLIT = 0.20      # cosine distance between the chroma of the beats before/after a boundary
+CHROMA_SPLIT = 0.30      # cosine distance between the chroma of the beats before/after a boundary
 CHROMA_WINDOW = 2        # beats averaged on each side of a candidate boundary
 MAX_BARS = 8
 GAP_BEATS = 1.25         # onset gap that starts a new phrase: "more than a beat", with room for jitter
@@ -97,7 +97,8 @@ def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False
     params = {"algo": ALGO, "sensitivity": sensitivity, "onset_delta": ONSET_DELTA,
               "min_interval_ms": MIN_INTERVAL_MS, "chroma_split": CHROMA_SPLIT,
               "chroma_window_beats": CHROMA_WINDOW, "max_bars": MAX_BARS, "loops_bars": [1, 2, 4],
-              "min_phrase_beats": 1, "gap_beats": GAP_BEATS, "silence_floor_dbfs": SILENCE_FLOOR_DB, "phrase_source": "sound"}
+              "min_phrase_beats": job.beats_per_bar, "min_phrase_bars": 1, "bar_line_pull_beats": 1.0,
+              "gap_beats": GAP_BEATS, "silence_floor_dbfs": SILENCE_FLOOR_DB, "phrase_source": "sound"}
     fp = runner.fingerprint(job, params)
     hit = runner.cached_summary(job, fp, force)
     if hit:
@@ -118,10 +119,11 @@ def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False
     if not job.tempo_reliable:
         notes.append("tempo unreliable: loops skipped and phrase starts not snapped to the beat grid")
     loops, dropped = runner.make_loops(job, y, sr, (1, 2, 4), "melloop", "loops")
-    params["loops_dropped_silent"] = dropped
+    params["loops_dropped"] = dropped
 
     # --- phrases
     B = job.beat_s
+    bar = job.bar_s
     grid = _grid(job, dur)
     m22 = librosa.resample(mono, orig_sr=sr, target_sr=CHROMA_SR)
     chroma = librosa.feature.chroma_cqt(y=m22, sr=CHROMA_SR, hop_length=CHROMA_HOP)
@@ -138,6 +140,9 @@ def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False
 
     onsets = onset_samples(mono, sr, delta=ONSET_DELTA, min_interval_ms=MIN_INTERVAL_MS, sensitivity=sensitivity)
     onsets = [int(o) for o in onsets if active[min(len(active) - 1, max(0, np.searchsorted(grid, o / sr, side="right") - 1))]]
+    snap = job.tempo_reliable and len(job.beats_s) >= 2
+    downbeats = np.asarray(job.downbeats_s) if len(job.downbeats_s) else np.asarray([])
+
     starts: list[tuple[float, str]] = []
     prev = None
     for o in onsets:
@@ -147,60 +152,68 @@ def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False
     for k, dist in harmony_changes(bchroma, active):
         starts.append((float(grid[k]), "harmony"))
     starts.sort()
-    kept: list[tuple[float, str]] = []
+
+    # prefer bar lines: a harmony boundary within 1 beat of a downbeat moves onto it; an onset start moves
+    # back onto a downbeat at most 1 beat earlier (never forward into the sound)
+    adj: list[tuple[float, str]] = []
     for t, why in starts:
-        if kept and t - kept[-1][0] < 0.9 * B:
+        if snap and downbeats.size:
+            j = int(np.argmin(np.abs(downbeats - t)))
+            d = float(downbeats[j])
+            if (why == "harmony" and abs(d - t) <= B) or (why == "onset-gap" and 0 <= t - d <= B):
+                t = d
+        adj.append((t, why))
+    adj.sort()
+    kept: list[tuple[float, str]] = []
+    for t, why in adj:
+        if kept and t - kept[-1][0] < 0.95 * bar:   # minimum phrase: one bar
             continue
         kept.append((t, why))
 
-    snap = job.tempo_reliable and len(job.beats_s) >= 2
-    phrases: list[tuple[float, float, str]] = []  # raw start, limit, reason (start already snapped)
-    for i, (t, why) in enumerate(kept):
-        if snap and why == "onset-gap":
+    phrases: list[tuple[float, str]] = []
+    for t, why in kept:
+        if snap and why == "onset-gap" and not any(abs(t - d) < 1e-6 for d in downbeats):
             j = int(np.argmin(np.abs(grid - t)))
-            if grid[j] > t + SNAP_TOLERANCE_S and j > 0:
-                j -= 1
-            t = float(grid[j])
-        phrases.append((t, 0.0, why))
-    # strictly increasing starts after snapping
-    clean: list[tuple[float, float, str]] = []
-    for t, _, why in phrases:
-        if clean and t <= clean[-1][0] + 1e-6:
+            g = float(grid[j])
+            if g <= t:
+                t = g
+            elif g - t > SNAP_TOLERANCE_S and j > 0:
+                t = float(grid[j - 1])      # never snap forward into the onset; within 20 ms before a beat: leave it
+        if phrases and t <= phrases[-1][0] + 1e-6:
             continue
-        clean.append((t, 0.0, why))
-    phrases = clean
+        phrases.append((t, why))
 
-    max_len = MAX_BARS * job.beats_per_bar * B
+    max_len = MAX_BARS * bar
     segs: list[tuple[float, float, str]] = []
-    for i, (t, _, why) in enumerate(phrases):
+    for i, (t, why) in enumerate(phrases):
         limit = phrases[i + 1][0] if i + 1 < len(phrases) else dur
         last = t
         for o in onsets:
             if t * sr <= o < limit * sr:
                 last = max(last, o / sr)
         e = decay_end(mono, sr, int(last * sr), int(limit * sr), floor_db=-40.0, max_s=60.0) / sr
-        e = max(e, min(limit, t + B))
+        e = max(e, min(limit, t + bar))
         # split overlong phrases on the grid
         while e - t > max_len + 1e-6:
             j = int(np.argmin(np.abs(grid - (t + max_len))))
-            cut = float(grid[j]) if grid[j] > t + B else t + max_len
+            cut = float(grid[j]) if grid[j] > t + bar else t + max_len
             segs.append((t, cut, why))
             t, why = cut, "max-length"
         segs.append((t, e, why))
 
     n_made = 0
+    short_dropped = 0
     for t, e, why in segs:
-        if e - t < 0.5 * B:
-            continue
         a, b = zero_snap(y, int(round(t * sr))), zero_snap(y, int(round(e * sr)))
         b = min(b, n)
-        if b - a < int(0.5 * B * sr):
+        if (b - a) / sr < 0.9 * bar:
+            short_dropped += 1
             continue
         seg_raw = y[a:b]
         r = rms_dbfs(seg_raw)
         if r is None or r < floor:
             continue
-        # key by chroma vote over the phrase's frames
+        # key by chroma vote over the phrase's frames (phrases are >= 1 bar here); null unless reliable
         f0, f1 = int(a / sr * CHROMA_SR / CHROMA_HOP), max(int(a / sr * CHROMA_SR / CHROMA_HOP) + 1, int(b / sr * CHROMA_SR / CHROMA_HOP))
         kd = estimate_key_from_chroma(chroma[:, f0:f1].mean(axis=1))
         seg = peak_normalize(apply_fades(seg_raw, sr), -1.0)
@@ -208,18 +221,20 @@ def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False
         name = f"phrase_{n_made:04d}"
         rel = f"chops/melodic/phrases/{name}.wav"
         write_chop(job.out_dir / rel, seg, sr)
-        cand = kd["key_candidate"]
-        chops.append(Chop(
+        reliable = bool(kd["key_reliable"])
+        c = Chop(
             id=name, stem="other", part=None, kind="phrase", source_start_s=round(a / sr, 6),
             source_end_s=round(b / sr, 6), path=rel, channels=seg.shape[1], sample_rate=sr,
             start_beat=runner.beat_position(job.beats_s, a / sr),
             length_beats=round((b - a) / sr / B, 3), peak_dbfs=peak_dbfs(seg), rms_dbfs=rms_dbfs(seg),
-            extra={"starts_because": why, "key": f"{cand['key']} {cand['mode']}" if cand else None,
-                   "key_reliable": kd["key_reliable"], "key_confidence": kd["key_confidence"],
+            extra={"starts_because": why, "key": f"{kd['key']} {kd['mode']}" if reliable else None,
+                   "key_reliable": reliable, "key_confidence": kd["key_confidence"],
                    "key_correlation": kd["key_correlation"], "source": "sound"},
-        ))
+        )
+        chops.append(runner.stamp(job, c, a, b))
     chops = loops + chops
     params["notes"] = notes
     params["n_onsets"] = len(onsets)
+    params["dropped"] = {"phrases_shorter_than_a_bar": short_dropped}
     log.info("melodic: %d loops, %d phrases", len(loops), n_made)
     return runner.finish(job, chops, params, fp, "chop.melodic")

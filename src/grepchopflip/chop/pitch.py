@@ -1,4 +1,4 @@
-"""Root note of a sample: pyin median f0 (librosa, MIT). Optional `penn` GPU cross-check (extra `pitch-gpu`)."""
+"""Root note of a sample: pyin median f0 (librosa, MIT)."""
 
 from __future__ import annotations
 
@@ -18,55 +18,46 @@ def midi_to_name(midi: int) -> str:
 
 
 def pitch_stats(y: np.ndarray, sr: int, fmin: float = 30.0, fmax: float = 400.0,
-                use_penn: bool = False) -> dict:
-    """{midi_float|None, f0_hz|None, voiced_fraction, spread_semitones|None, penn_midi|None}."""
+                spread_range_s: tuple[float, float] | None = None) -> dict:
+    """{midi_float, f0_hz, voiced_fraction, voiced_prob, spread_semitones} (None where undefined).
+
+    voiced_prob is the mean pyin voiced probability over all frames; voiced_fraction the share of frames
+    flagged voiced. The spread (p90 - p10 of voiced f0 in semitones) is measured over `spread_range_s`
+    (seconds from the start of `y`) when given, else over every voiced frame."""
     import librosa
 
     mono = y.mean(axis=1) if y.ndim == 2 else y
     mono = np.asarray(mono, dtype=np.float32)
     if sr != PITCH_SR:
         mono = librosa.resample(mono, orig_sr=sr, target_sr=PITCH_SR)
-    empty = {"midi_float": None, "f0_hz": None, "voiced_fraction": 0.0, "spread_semitones": None,
-             "penn_midi": None}
+    empty = {"midi_float": None, "f0_hz": None, "voiced_fraction": 0.0, "voiced_prob": 0.0,
+             "spread_semitones": None}
     if mono.size < MIN_SAMPLES or float(np.max(np.abs(mono))) < 1e-5:
         return empty
-    f0, voiced, _ = librosa.pyin(mono, fmin=fmin, fmax=fmax, sr=PITCH_SR, frame_length=FRAME_LENGTH,
-                                 hop_length=HOP, fill_na=None)
+    f0, voiced, prob = librosa.pyin(mono, fmin=fmin, fmax=fmax, sr=PITCH_SR, frame_length=FRAME_LENGTH,
+                                    hop_length=HOP, fill_na=None)
     frac = float(np.mean(voiced)) if voiced.size else 0.0
-    out = dict(empty, voiced_fraction=round(frac, 4))
-    sel = f0[voiced & np.isfinite(f0)]
+    out = dict(empty, voiced_fraction=round(frac, 4), voiced_prob=round(float(np.mean(prob)), 4))
+    ok = voiced & np.isfinite(f0)
+    sel = f0[ok]
     if sel.size:
         med = float(np.median(sel))
         out["f0_hz"] = round(med, 3)
         out["midi_float"] = float(librosa.hz_to_midi(med))
-        semis = librosa.hz_to_midi(sel)
-        out["spread_semitones"] = round(float(np.percentile(semis, 90) - np.percentile(semis, 10)), 3)
-    if use_penn and (frac < 0.5 or (out["spread_semitones"] or 0) > 1.0):
-        out["penn_midi"] = _penn_midi(mono, fmin, fmax)
+        use = ok
+        if spread_range_s is not None:
+            t = np.arange(len(f0)) * HOP / PITCH_SR
+            use = ok & (t >= spread_range_s[0]) & (t <= spread_range_s[1])
+        semis = librosa.hz_to_midi(f0[use])
+        out["spread_semitones"] = (round(float(np.percentile(semis, 90) - np.percentile(semis, 10)), 3)
+                                   if semis.size >= 2 else 0.0)
     return out
 
 
-def _penn_midi(mono: np.ndarray, fmin: float, fmax: float) -> float | None:
-    """Median pitch from PENN (GPU) or None when the `pitch-gpu` extra is missing."""
-    try:
-        import penn
-        import torch
-        import librosa
-    except Exception:  # not installed, or (torch 2.14 / cu130) torbi has no matching compiled library
-        return None
-    audio = torch.from_numpy(mono)[None]
-    pitch, periodicity = penn.from_audio(audio, PITCH_SR, hopsize=0.01, fmin=max(fmin, 31.0), fmax=fmax,
-                                         gpu=0 if torch.cuda.is_available() else None)
-    p = pitch[0].cpu().numpy()
-    per = periodicity[0].cpu().numpy()
-    sel = p[(per > 0.5) & np.isfinite(p) & (p > 0)]
-    return float(librosa.hz_to_midi(np.median(sel))) if sel.size else None
-
-
-def root_of(y: np.ndarray, sr: int, fmin: float = 30.0, fmax: float = 400.0,
-            use_penn: bool = False) -> tuple[int | None, str | None, float]:
+def root_of(y: np.ndarray, sr: int, fmin: float = 30.0,
+            fmax: float = 400.0) -> tuple[int | None, str | None, float]:
     """(midi, note name, confidence): median f0 of voiced frames; confidence = voiced fraction."""
-    st = pitch_stats(y, sr, fmin, fmax, use_penn)
+    st = pitch_stats(y, sr, fmin, fmax)
     if st["midi_float"] is None:
         return None, None, float(st["voiced_fraction"])
     midi = int(round(st["midi_float"]))

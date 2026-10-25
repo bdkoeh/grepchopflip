@@ -22,6 +22,7 @@ from grepchopflip.chop.common import (
 )
 from grepchopflip.chop.pitch import midi_to_name
 from grepchopflip.config import cache_dir
+from grepchopflip.errors import SeparationError
 from grepchopflip.key import NOTES, estimate_key_from_chroma
 
 log = logging.getLogger("grepchopflip.chop")
@@ -129,7 +130,7 @@ def chop_notes(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, 
         notes = run_model(job.stem_path, model)
     except Exception as e:
         if type(e).__name__ != "ModelDownloadError":
-            raise
+            raise SeparationError(f"MuScriptor transcription failed: {type(e).__name__}: {e}")
         why = "MuScriptor weights are gated: accept the license at https://huggingface.co/MuScriptor/muscriptor-" \
               f"{model} and run `hf auth login` (or set HF_TOKEN)"
         log.warning("note-based phrases skipped: %s", why)
@@ -141,6 +142,7 @@ def chop_notes(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, 
 def phrases_from_notes(job: runner.Job, notes: list[Note], params: dict, fp: str) -> dict:
     y, sr = load_stem(job.stem_path)
     y = fold_mono_if_correlated(y)
+    job.sr = sr
     n = len(y)
     B = job.beat_s
     grid = np.asarray(job.beats_s, dtype=float)
@@ -175,7 +177,7 @@ def phrases_from_notes(job: runner.Job, notes: list[Note], params: dict, fp: str
         rel = f"chops/melodic/phrases_notes/{name}.wav"
         write_chop(job.out_dir / rel, out, sr)
         prev_end = b
-        chops.append(Chop(
+        chops.append(runner.stamp(job, Chop(
             id=name, stem="other", part=None, kind="phrase", source_start_s=round(a / sr, 6),
             source_end_s=round(b / sr, 6), path=rel, channels=out.shape[1], sample_rate=sr,
             start_beat=runner.beat_position(job.beats_s, a / sr), length_beats=round((b - a) / sr / B, 3),
@@ -184,9 +186,10 @@ def phrases_from_notes(job: runner.Job, notes: list[Note], params: dict, fp: str
             extra={"source": "muscriptor", "license": LICENSE, "n_notes": len(cl),
                    "pitch_range": [min(x[0] for x in cl), max(x[0] for x in cl)],
                    "instruments": sorted({x[3] for x in cl}),
-                   "key": f"{cand['key']} {cand['mode']}" if cand else None, "key_reliable": kd["key_reliable"],
+                   "key": f"{cand['key']} {cand['mode']}" if cand and kd["key_reliable"] else None,
+                   "key_reliable": kd["key_reliable"],
                    "notes": [[x[0], round(x[1] - a / sr, 3), round(x[2] - x[1], 3)] for x in cl][:200]},
-        ))
+        ), a, b))
     params = dict(params, notes=[], n_notes_total=len(notes))
     log.info("notes: %d note-based phrases from %d notes", len(chops), len(notes))
     return runner.finish(job, chops, params, fp, "chop.notes", "chops_notes.json")

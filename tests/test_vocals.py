@@ -79,3 +79,57 @@ def test_cli_chop_json_stdout_contract(job):
     assert r.exit_code == 3
     r = CliRunner().invoke(app, ["chop", str(job), "--stems", "kazoo"])
     assert r.exit_code == 2
+
+
+def _tone_job(tmp_path, regions, seconds, dips=()):
+    y = np.zeros(int(seconds * SR), dtype=np.float32)
+    for start, dur in regions:
+        t = np.arange(int(dur * SR)) / SR
+        sig = (tone(220.0, dur, harmonics=(1, .6, .4, .2), attack=0.02, decay=0.0, amp=0.5)
+               * (0.8 + 0.2 * np.sin(2 * np.pi * 4 * t))).astype(np.float32)
+        place(y, start, sig)
+    for d0, d1 in dips:
+        y[int(d0 * SR):int(d1 * SR)] = 0
+    return write_job(tmp_path, {"vocals": y}, seconds)
+
+
+def test_start_never_cut_into_the_sound_before_a_beat(tmp_path):
+    root = _tone_job(tmp_path, [(3.45, 1.2)], 8.0)        # onset 50 ms before the beat at 3.5
+    chop_vocals(root, force=True)
+    c = json.loads((root / "chops/vocals/chops.json").read_text())["chops"][0]
+    assert c["source_start_s"] <= 3.45 + 0.003 and not c["extra"]["beat_snapped"]
+
+
+def test_ten_second_region_is_one_phrase(tmp_path):
+    root = _tone_job(tmp_path, [(1.0, 10.0)], 14.0)
+    chop_vocals(root, force=True)
+    ph = json.loads((root / "chops/vocals/chops.json").read_text())["chops"]
+    assert len(ph) == 1 and ph[0]["extra"]["duration_s"] > 9.9
+
+
+def test_over_cap_region_splits_at_a_dip(tmp_path):
+    root = _tone_job(tmp_path, [(2.0, 22.0)], 27.0, dips=[(12.9, 13.0)])   # 100 ms dip < max_silence
+    res = chop_vocals(root, force=True)
+    doc = json.loads((root / "chops/vocals/chops.json").read_text())
+    ph = doc["chops"]
+    assert len(ph) == 2 and doc["params"]["regions_split_at_cap"] == 1
+    assert all(c["extra"]["duration_s"] <= 14.0 for c in ph)
+    assert 12.7 < ph[0]["source_end_s"] < 13.2
+
+
+def test_tail_extends_past_threshold_end(tmp_path):
+    y = np.zeros(int(8 * SR), dtype=np.float32)
+    place(y, 1.0, tone(220.0, 1.0, harmonics=(1, .6), attack=0.02, decay=0.0, amp=0.5))
+    place(y, 2.0, tone(220.0, 0.6, harmonics=(1, .6), attack=0.005, decay=6.0, amp=0.3))   # ringing tail
+    root = write_job(tmp_path, {"vocals": y}, 8.0)
+    chop_vocals(root, force=True)
+    c = json.loads((root / "chops/vocals/chops.json").read_text())["chops"][0]
+    assert c["source_end_s"] >= 2.1
+
+
+def test_records_carry_provenance(job):
+    chop_vocals(job, force=True)
+    doc = json.loads((job / "chops/vocals/chops.json").read_text())
+    assert set(doc["params"]["dropped"]) >= {"too_short", "low_voiced", "peak_below_gate"}
+    for c in doc["chops"]:
+        assert c["source_file"] == "stems/vocals.wav" and len(c["source_sha256"]) == 64 and c["bit_depth"] == 24

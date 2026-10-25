@@ -243,7 +243,7 @@ def chop(
 
     from rich.logging import RichHandler
 
-    from grepchopflip.errors import InputError
+    from grepchopflip.errors import InputError, MissingDependencyError, SeparationError
 
     names = [s.strip() for s in stems.split(",") if s.strip()] if stems else list(CHOPPERS)
     bad = [s for s in names if s not in CHOPPERS]
@@ -279,6 +279,12 @@ def chop(
     except InputError as e:
         err.print(f"[red]![/] {e}")
         raise typer.Exit(EXIT_INPUT)
+    except MissingDependencyError as e:
+        err.print(f"[red]![/] {e}")
+        raise typer.Exit(EXIT_MISSING_DEP)
+    except SeparationError as e:
+        err.print(f"[red]![/] {e}")
+        raise typer.Exit(EXIT_MODEL)
     finally:
         pkg_log.removeHandler(handler)
 

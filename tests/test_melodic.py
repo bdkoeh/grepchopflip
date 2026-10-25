@@ -10,8 +10,8 @@ from chopfix import BEAT, BPB, SR, place, tone, write_job
 SECONDS = 16.0
 BAR = BEAT * BPB
 # (start_s, chord): programmed harmony changes every 2 bars; the last bar is silent
-CHORDS = [(0.0, [220.0, 261.63, 329.63]), (4.0, [174.61, 220.0, 261.63]),
-          (8.0, [196.0, 246.94, 293.66]), (12.0, [164.81, 196.0, 246.94])]
+CHORDS = [(0.0, [220.0, 261.63, 329.63]), (4.0, [146.83, 185.0, 220.0]),
+          (8.0, [233.08, 293.66, 349.23]), (12.0, [164.81, 207.65, 246.94])]
 
 
 def _other():
@@ -72,3 +72,21 @@ def test_stale_outputs_removed_on_rebuild(job):
     stray.write_bytes(b"x")
     chop_melodic(job, force=True)
     assert not stray.exists()
+
+
+def test_fast_chord_changes_do_not_make_two_beat_phrases(tmp_path):
+    y = np.zeros(int(16 * SR), dtype=np.float32)
+    a, b = [220.0, 261.63, 329.63], [233.08, 293.66, 349.23]
+    for k in range(16):                                       # chord flips every 2 beats (1 s)
+        t = k * 2 * BEAT
+        for j in range(2):
+            place(y, t + j * BEAT, tone(a if k % 2 == 0 else b, BEAT * 0.95, harmonics=(1.0, 0.3), decay=2.0))
+    root = write_job(tmp_path, {"other": y}, 16.0)
+    chop_melodic(root, force=True)
+    doc = json.loads((root / "chops/melodic/chops.json").read_text())
+    ph = [c for c in doc["chops"] if c["kind"] == "phrase"]
+    assert ph and min(c["length_beats"] for c in ph) >= 3.5, [c["length_beats"] for c in ph]
+    assert doc["params"]["min_phrase_beats"] == 4
+    for c in ph:                                              # key only when reliable
+        assert c["extra"]["key"] is None or c["extra"]["key_reliable"]
+        assert c["source_file"] == "stems/other.wav" and c["bit_depth"] == 24
