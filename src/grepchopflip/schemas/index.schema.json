@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grepchopflip.example/schemas/index.schema.json",
+  "title": "gcf song index",
+  "description": "index.json at the root of one song folder: every organized sample with its facts. Every sample path is relative to the song folder (D-048), so the folder can be moved. Fields are nullable rather than missing. `character`, `dedup_group` and `is_dedup_representative` are reserved for slice 7 and are null in 1.0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generator", "created", "source", "analysis", "models", "params", "stages", "samples"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {"name": {"type": "string"}, "version": {"type": "string"}}
+    },
+    "created": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "name", "sha256", "duration_s", "sample_rate", "channels", "title", "artist", "license"],
+      "properties": {
+        "path": {"type": ["string", "null"], "description": "Where the input file was when it was separated (informational; not under the song folder)."},
+        "name": {"type": ["string", "null"]},
+        "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "duration_s": {"type": ["number", "null"]},
+        "sample_rate": {"type": ["integer", "null"]},
+        "channels": {"type": ["integer", "null"]},
+        "title": {"type": ["string", "null"]},
+        "artist": {"type": ["string", "null"]},
+        "license": {"type": "string"}
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bpm", "bpm_confidence", "tempo_reliable", "beats_per_bar", "key", "mode", "key_confidence", "key_reliable", "grid_source", "grid_consistency", "downbeats_s"],
+      "properties": {
+        "bpm": {"type": ["number", "null"]},
+        "bpm_confidence": {"type": ["number", "null"]},
+        "tempo_reliable": {"type": "boolean"},
+        "beats_per_bar": {"type": ["integer", "null"]},
+        "key": {"type": ["string", "null"]},
+        "mode": {"enum": ["major", "minor", null]},
+        "key_confidence": {"type": ["number", "null"]},
+        "key_reliable": {"type": "boolean"},
+        "grid_source": {"type": ["string", "null"]},
+        "grid_consistency": {"type": ["number", "null"]},
+        "downbeats_s": {"type": "array", "items": {"type": "number"}}
+      }
+    },
+    "models": {"type": "object"},
+    "params": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bit_depth", "normalize"],
+      "properties": {"bit_depth": {"enum": [16, 24]}, "normalize": {"const": "peak"}}
+    },
+    "stages": {
+      "type": "object",
+      "required": ["separate", "analyze", "chop", "organize"],
+      "properties": {
+        "separate": {"$ref": "#/$defs/stage"},
+        "analyze": {"$ref": "#/$defs/stage"},
+        "chop": {"$ref": "#/$defs/stage"},
+        "organize": {"$ref": "#/$defs/stage"}
+      }
+    },
+    "samples": {"type": "array", "items": {"$ref": "#/$defs/sample"}}
+  },
+  "$defs": {
+    "stage": {
+      "type": "object",
+      "required": ["done"],
+      "properties": {"done": {"type": "boolean"}}
+    },
+    "relpath": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*[\\\\:])(?!(.*/)?\\.\\.(/|$)).+$"
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "path", "stem", "part", "kind", "class", "needs_review", "review_reasons",
+        "source_start_s", "source_end_s", "duration_s", "source_start_bar", "start_beat", "length_beats",
+        "bars", "bpm", "channels", "sample_rate", "bit_depth", "root_midi", "root_note", "root_confidence",
+        "key", "mode", "peak_dbfs", "rms_dbfs", "crest_db", "lufs_i", "lufs_measure", "fade_in_ms",
+        "fade_out_ms", "zero_snapped", "character", "dedup_group", "is_dedup_representative", "tags",
+        "source_file", "source_sha256", "sha256"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "path": {"$ref": "#/$defs/relpath"},
+        "stem": {"enum": ["drums", "bass", "other", "vocals"]},
+        "part": {"enum": ["kick", "snare", "toms", "hh", "ride", "crash", null]},
+        "kind": {"enum": ["oneshot", "loop", "phrase", "word"]},
+        "class": {"enum": ["Kick", "Snare", "Tom", "Hat", "Ride", "Crash", "Perc", "Bass", "DrumLoop", "BassLoop", "MelLoop", "Mel", "Vox", "Word"]},
+        "needs_review": {"type": "boolean"},
+        "review_reasons": {"type": "array", "items": {"type": "string"}},
+        "source_start_s": {"type": "number"},
+        "source_end_s": {"type": "number"},
+        "duration_s": {"type": "number", "minimum": 0},
+        "source_start_bar": {"type": ["integer", "null"], "description": "1-based bar of the start on the downbeat grid; 0 = before bar 1."},
+        "start_beat": {"type": ["number", "null"]},
+        "length_beats": {"type": ["number", "null"]},
+        "bars": {"type": ["integer", "null"]},
+        "bpm": {"type": ["number", "null"], "description": "Song tempo for loops and phrases when it is reliable, else null."},
+        "channels": {"type": "integer", "minimum": 1},
+        "sample_rate": {"type": "integer", "minimum": 1},
+        "bit_depth": {"enum": [16, 24]},
+        "root_midi": {"type": ["integer", "null"]},
+        "root_note": {"type": ["string", "null"]},
+        "root_confidence": {"type": ["number", "null"]},
+        "key": {"type": ["string", "null"]},
+        "mode": {"enum": ["major", "minor", null]},
+        "peak_dbfs": {"type": ["number", "null"]},
+        "rms_dbfs": {"type": ["number", "null"]},
+        "crest_db": {"type": ["number", "null"]},
+        "lufs_i": {"type": ["number", "null"]},
+        "lufs_measure": {"enum": ["integrated", "short_term_padded", null]},
+        "fade_in_ms": {"type": ["number", "null"]},
+        "fade_out_ms": {"type": ["number", "null"]},
+        "zero_snapped": {"type": ["boolean", "null"]},
+        "character": {"type": ["array", "null"], "items": {"type": "string"}, "description": "Slice 7."},
+        "dedup_group": {"type": ["string", "integer", "null"], "description": "Slice 7."},
+        "is_dedup_representative": {"type": ["boolean", "null"], "description": "Slice 7."},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "source_file": {"type": ["string", "null"]},
+        "source_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

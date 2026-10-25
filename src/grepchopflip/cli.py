@@ -106,7 +106,9 @@ def info(
 @app.command()
 def separate(
     audio: Path = typer.Argument(..., help="Song to split (wav, flac, aiff, mp3, m4a, ogg)."),
-    out: Optional[Path] = typer.Option(None, "-o", "--out", help="Output folder. Default: ./out/<song-name>-<hash8>"),
+    out: Optional[Path] = typer.Option(None, "-o", "--out", help="Output folder. Default: <library>/<song-name>-<hash8>"),
+    library: Optional[Path] = typer.Option(None, "--library", help="Library folder holding one folder per song "
+                                           "(default: $GCF_LIBRARY or ~/Music/gcf-library). -o wins."),
     fast: bool = typer.Option(False, "--fast", help="Use the faster htdemucs model (lower quality)."),
     device: str = typer.Option("cuda", "--device", help="cuda or cpu."),
     force: bool = typer.Option(False, "--force", help="Ignore the cache and rerun both passes."),
@@ -132,7 +134,7 @@ def separate(
     try:
         # Libraries sometimes print; keep stdout reserved for our result.
         with contextlib.redirect_stdout(sys.stderr):
-            result = sep_mod.separate(audio, out, fast=fast, device=device, force=force)
+            result = sep_mod.separate(audio, out, fast=fast, device=device, force=force, library=library)
     except InputError as e:
         err.print(f"[red]![/] {e}")
         raise typer.Exit(EXIT_INPUT)
@@ -161,7 +163,9 @@ def separate(
 @app.command()
 def analyze(
     path: Path = typer.Argument(..., help="Song file, or an existing output folder (source.json / stems/)."),
-    out: Optional[Path] = typer.Option(None, "-o", "--out", help="Output folder (default: out/<song> or the given folder)."),
+    out: Optional[Path] = typer.Option(None, "-o", "--out", help="Output folder (default: <library>/<song> or the given folder)."),
+    library: Optional[Path] = typer.Option(None, "--library", help="Library folder holding one folder per song "
+                                           "(default: $GCF_LIBRARY or ~/Music/gcf-library). -o wins."),
     bpm: Optional[float] = typer.Option(None, "--bpm", help="Override the tempo (recorded as an override)."),
     key: Optional[str] = typer.Option(None, "--key", help="Override the key, e.g. 'A minor' or 'F#m'."),
     force: bool = typer.Option(False, "--force", help="Recompute even if cached."),
@@ -189,7 +193,8 @@ def analyze(
     try:
         # Libraries that print would corrupt the stdout contract; send their output to stderr.
         with contextlib.redirect_stdout(sys.stderr):
-            result = run_analyze(path, out_dir=out, bpm_override=bpm, key_override=key, force=force)
+            result = run_analyze(path, out_dir=out, bpm_override=bpm, key_override=key, force=force,
+                                library=library)
     except AudioReadError as e:
         err.print(f"error: {e}", highlight=False, markup=False)
         raise typer.Exit(EXIT_INPUT)
@@ -365,6 +370,89 @@ def _print_chop_results(results: dict) -> None:
         elif "counts" in r:
             counts = ", ".join(f"{k} {v}" for k, v in r["counts"].items()) or "nothing"
             print(f"  {counts}")
+
+
+@app.command()
+def organize(
+    song_dir: Path = typer.Argument(..., help="Song folder after `gcf chop`."),
+    bit_depth: int = typer.Option(24, "--bit-depth", help="Output bit depth: 24 (bit-exact) or 16 (TPDF dither). "
+                                  "16-bit is one-way: to go back to 24, run `gcf chop --force` first."),
+    force: bool = typer.Option(False, "--force", help="Rewrite every file even if it is already in place."),
+    as_json: bool = typer.Option(False, "--json", help="Print a JSON summary on stdout."),
+) -> None:
+    """Sort chops into oneshots/ loops/ phrases/ words/ review/ with short names, tag them, write index.json."""
+    import soundfile as sf
+
+    from grepchopflip import organize as org
+    from grepchopflip.errors import InputError
+
+    if bit_depth not in (16, 24):
+        err.print("error: --bit-depth must be 16 or 24", highlight=False, markup=False)
+        raise typer.Exit(EXIT_USAGE)
+    try:
+        r = org.organize(song_dir, bit_depth=bit_depth, force=force)
+    except org.PartialOrganize as e:
+        err.print(f"error: {e}; the chop records still point at the original files, run it again",
+                  highlight=False, markup=False)
+        raise typer.Exit(EXIT_PARTIAL)
+    except (InputError, OSError, sf.LibsndfileError) as e:
+        err.print(f"error: {e}", highlight=False, markup=False)
+        raise typer.Exit(EXIT_INPUT)
+    for p in r["problems"]:
+        err.print(f"error: {p}", highlight=False, markup=False)
+    if as_json:
+        print(json.dumps(r, indent=2))
+    else:
+        print(f"organize: {'cached' if r['cached'] else 'written'}  {r['samples']} samples "
+              f"({r['review']} to review), {r['bit_depth']}-bit  {song_dir / r['index']}")
+        for folder, n in r["counts"].items():
+            print(f"  {folder}: {n}")
+    if r["problems"]:
+        raise typer.Exit(EXIT_PARTIAL)
+
+
+@app.command()
+def index(
+    song_dir: Path = typer.Argument(..., help="Song folder."),
+    validate: bool = typer.Option(False, "--validate", help="Check index.json against the schema and that every "
+                                                            "path exists; exit 3 when it does not."),
+    as_json: bool = typer.Option(False, "--json", help="Print the result as JSON on stdout."),
+) -> None:
+    """Rebuild index.json from the current records (no files move); --validate only checks it."""
+    import soundfile as sf
+
+    from grepchopflip import organize as org
+    from grepchopflip.errors import InputError
+    from grepchopflip.index_schema import validate_index_file
+
+    result: dict = {}
+    if not validate:
+        try:
+            result = org.rebuild_index(song_dir)
+        except (InputError, OSError, sf.LibsndfileError) as e:
+            err.print(f"error: {e}", highlight=False, markup=False)
+            raise typer.Exit(EXIT_INPUT)
+        for p in result["problems"]:
+            err.print(f"error: {p}", highlight=False, markup=False)
+        if not as_json:
+            print(f"index: {'written' if result['changed'] else 'unchanged'}  {result['samples']} samples  "
+                  f"{song_dir / result['index']}")
+        if result["problems"]:
+            if as_json:
+                print(json.dumps(result, indent=2))
+            raise typer.Exit(EXIT_PARTIAL)
+        if as_json:
+            print(json.dumps(result, indent=2))
+        return
+    v = validate_index_file(song_dir)
+    for p in v["problems"]:
+        err.print(f"error: {p}", highlight=False, markup=False)
+    if as_json:
+        print(json.dumps(v, indent=2))
+    else:
+        print(f"index: {'valid' if v['valid'] else 'invalid'}  {v['samples']} samples")
+    if not v["valid"]:
+        raise typer.Exit(EXIT_INPUT)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -119,17 +119,65 @@ def _review_flags(folder: Path) -> dict[str, list[str]]:
     return flags
 
 
+def _index_rows(folder: Path) -> dict[str, dict]:
+    """path (relative to `folder`) -> index.json sample row, from the nearest index.json at or above `folder`."""
+    import json
+
+    for base in (folder, *folder.parents[:3]):
+        ip = base / "index.json"
+        if not ip.is_file():
+            continue
+        try:
+            doc = json.loads(ip.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        rows = {}
+        for s in doc.get("samples", []):
+            try:
+                rel = (base / s["path"]).resolve().relative_to(folder.resolve()).as_posix()
+            except (ValueError, KeyError):
+                continue
+            rows[rel] = s
+        return rows
+    return {}
+
+
+def _facts(s: dict) -> str:
+    """One short line: bpm, root note, key, length (from an index row)."""
+    bits = []
+    if s.get("bpm"):
+        bits.append(f"{round(s['bpm'])} bpm")
+    if s.get("root_note") and (s.get("root_confidence") or 0) >= 0.5:
+        bits.append(str(s["root_note"]))
+    if s.get("key") and s.get("mode"):
+        bits.append(f"{s['key']} {s['mode']}")
+    if s.get("bars"):
+        bits.append(f"{s['bars']} bar")
+    if s.get("duration_s") is not None:
+        bits.append(f"{s['duration_s']:.2f}s")
+    return " · ".join(bits)
+
+
 def build(folder: Path) -> Path:
     wavs = sorted(p for p in folder.rglob("*.wav") if p.is_file())
     flags = _review_flags(folder)
+    rows = _index_rows(folder)
     pads, audios = [], []
     for i, w in enumerate(wavs):
         rel = w.relative_to(folder).as_posix()
         key = KEYS[i] if i < len(KEYS) else ""
         label = html.escape(rel)
+        row = rows.get(rel)
+        if row:
+            if row.get("needs_review"):
+                flags[rel] = list(row.get("review_reasons") or []) or ["needs_review"]
+            facts = _facts(row)
+            if facts:
+                label += '<br><span style="color:#8bc">' + html.escape(facts) + "</span>"
         reasons = flags.get(rel)
         mark = ' <span style="color:#e6a23c">&#9888; ' + html.escape(", ".join(reasons)) + "</span>" if reasons else ""
-        tip = html.escape(rel + (" | review: " + ", ".join(reasons) if reasons else ""))
+        tip = html.escape(rel + (" | review: " + ", ".join(reasons) if reasons else "")
+                          + (" | " + _facts(row) if row and _facts(row) else ""))
         pads.append(f'<button title="{tip}"><b>{html.escape(key.upper())}</b>{label}{mark}</button>')
         src = urllib.parse.quote(rel)
         audios.append(f'<audio id="a{i}" src="{src}" preload="none"></audio>')
@@ -141,16 +189,27 @@ def build(folder: Path) -> Path:
     return out
 
 
+KIND_FOLDERS = ("oneshots", "loops", "phrases", "words", "review", "stems")      # organized tree (slice 6)
+LEGACY_FOLDERS = ("drums", "bass", "melodic", "vocals", "words", "stems", "chops")   # chops/<stem>/ before organize
+
+
+def _board_dir(root: Path, w: Path) -> Path | None:
+    parts = w.relative_to(root).parts[:-1]
+    for i, p in enumerate(parts):
+        if p == "chops":                       # not organized yet: one board per stem folder
+            d = w.parent
+            while d != root and d.name not in LEGACY_FOLDERS:
+                d = d.parent
+            return d if d != root else None
+        if p in KIND_FOLDERS:                  # organized: one board per kind folder (oneshots/, review/, ...)
+            return root.joinpath(*parts[: i + 1])
+    return None
+
+
 def build_all(root: Path) -> list[Path]:
-    """One pad board per leaf chops folder (drums, bass, melodic, vocals, words, stems) under root."""
-    targets = set()
-    for w in root.rglob("*.wav"):
-        d = w.parent
-        # climb to the nearest folder named like a stem/kind group so one board covers its subfolders
-        while d != root and d.name not in ("drums", "bass", "melodic", "vocals", "words", "stems", "chops"):
-            d = d.parent
-        if d != root:
-            targets.add(d)
+    """One pad board per kind folder (oneshots, loops, phrases, words, review, stems) under root; for a song
+    that is not organized yet, one per chops/<stem> folder. Pads show index.json facts when it exists."""
+    targets = {t for t in (_board_dir(root, w) for w in root.rglob("*.wav")) if t is not None}
     return [build(t) for t in sorted(targets)]
 
 
