@@ -97,7 +97,8 @@ HOP = 256
 LOOP_SILENT_DBFS = -50.0
 LOOP_FADE_MS = 1.5
 LOOP_LENGTH_TOL = 0.08
-GRID_WINDOW_S = 0.025       # tracker lag never exceeds its 20 ms grid; wider windows snapped to neighbours
+GRID_WINDOW_S = 0.045       # look back this far for the pre-attack point (tracker lags up to ~20 ms, plus the
+                            # ramp before the 15 % point); forwards only window/4 (tracker never leads)
 GRID_CONSISTENCY_MIN = 0.8
 RANKING = "std_of_per_beat_rms_db"
 
@@ -178,7 +179,11 @@ def _pre_attack(env_fast: np.ndarray, attack: int, lo_bound: int, sr: int, max_m
     if attack <= a:
         return attack
     seg = env_fast[a:attack + 1]
-    return a + int(np.argmin(seg))
+    m = float(seg.min())
+    # the LAST point of the quiet floor: on a silent run-up this is right before the ramp starts,
+    # on noisy real audio it is the local minimum closest to the attack
+    quiet = np.where(seg <= m * 1.05 + 1e-7)[0]
+    return a + int(quiet[-1])
 
 
 def _moving_max(x: np.ndarray, size: int) -> np.ndarray:

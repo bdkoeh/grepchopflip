@@ -165,18 +165,22 @@ def bar_loops(downbeats_s: list[float], beats_per_bar: int, duration_s: float,
 
 
 def corrected_downbeats(downbeats_s: list[float], onsets_s: list[float], window_s: float = 0.040,
-                        preroll_s: float = 0.0015) -> list[float]:
-    """Move each tracked downbeat to the nearest onset within +-`window_s` (minus `preroll_s`, so a
-    fade-in ends at the attack); a downbeat with no onset in range is left where it is. Tracker
-    downbeats typically lag the real hit by 6-16 ms, which clips the first hit of a loop.
-    Pass the result to `bar_loops` as `downbeats_s`."""
+                        preroll_s: float = 0.0015, after_s: float | None = None) -> list[float]:
+    """Move each tracked downbeat to the nearest onset in [d - window_s, d + after_s] (minus
+    `preroll_s`); a downbeat with no onset in range is left where it is. Beat trackers lag the real
+    hit (6-20 ms on a 20 ms grid) and essentially never lead it, so the window looks mostly backwards:
+    `after_s` defaults to a quarter of `window_s`. Pass the result to `bar_loops` as `downbeats_s`."""
     ons = np.sort(np.asarray(list(onsets_s), dtype=float))
+    after = window_s / 4 if after_s is None else after_s
     out: list[float] = []
     for d in downbeats_s:
         if ons.size:
             j = int(np.argmin(np.abs(ons - d)))
-            if abs(ons[j] - d) <= window_s:
-                out.append(float(ons[j] - preroll_s))
+            # nearest may be ahead and out of range while an earlier one is in range: check both sides
+            cands = [k for k in (j - 1, j, j + 1) if 0 <= k < ons.size and -window_s <= ons[k] - d <= after]
+            if cands:
+                k = min(cands, key=lambda k: abs(ons[k] - d))
+                out.append(float(ons[k] - preroll_s))
                 continue
         out.append(float(d))
     return out

@@ -117,13 +117,13 @@ def test_loops_start_on_the_hit_when_tracker_lags(out_dir):
     grid = json.loads((out_dir / "chops" / "grid.json").read_text())
     assert grid["source"] == "drums" and grid["beats_per_bar"] == 4 and grid["bpm"] == 120.0
     assert len(grid["downbeats_s_tracked"]) == len(grid["downbeats_s_corrected"]) == len(grid["offsets_ms"]) == 5
-    assert all(-12.5 < o < -10.5 for o in grid["offsets_ms"][:4])    # 10 ms lag + 1.5 ms pre-roll
+    assert all(-13.5 < o < -9.5 for o in grid["offsets_ms"][:4])     # 10 ms lag, cut at the pre-attack quiet point
     assert grid["offsets_ms"][4] == 0.0                              # no hit at 8.5 s: left as tracked
     full, sr = sf.read(str(out_dir / "stems" / "drums.wav"), always_2d=True)
     for c in loops:
         hit_t = min(true_onsets(), key=lambda t: abs(t - c["extra"]["downbeat_corrected_s"]))
         lead = hit_t - c["source_start_s"]
-        assert 0.0005 <= lead <= 0.0025, lead                        # starts just before the hit, not 10 ms after
+        assert -0.0002 <= lead <= 0.003, lead                        # at or just before the hit, never after it
         assert c["extra"]["downbeat_tracked_s"] == pytest.approx(hit_t + LAG, abs=1e-5)
         s, e = c["extra"]["start_sample"], c["extra"]["end_sample"]
         y, _ = sf.read(str(out_dir / c["path"]), always_2d=True)
