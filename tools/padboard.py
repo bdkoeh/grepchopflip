@@ -91,14 +91,42 @@ addEventListener('keydown', e => {{
 """
 
 
+def _review_flags(folder: Path) -> dict[str, list[str]]:
+    """path (relative to `folder`) -> review reasons, read from any chops*.json in the folder or above."""
+    import json
+
+    flags: dict[str, list[str]] = {}
+    for base in (folder, *folder.parents[:3]):
+        for cj in base.glob("chops*.json"):
+            try:
+                doc = json.loads(cj.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            # chops.json paths are relative to the song folder (the one containing chops/)
+            song = base if (base / "chops").is_dir() else base.parent if (base.parent / "chops").is_dir() else None
+            for c in doc.get("chops", []):
+                p = (song / c["path"]) if song else (base / c["path"])
+                try:
+                    rel = p.resolve().relative_to(folder.resolve()).as_posix()
+                except ValueError:
+                    continue
+                if c.get("needs_review"):
+                    flags[rel] = list(c.get("extra", {}).get("review_reasons", [])) or ["needs_review"]
+    return flags
+
+
 def build(folder: Path) -> Path:
     wavs = sorted(p for p in folder.rglob("*.wav") if p.is_file())
+    flags = _review_flags(folder)
     pads, audios = [], []
     for i, w in enumerate(wavs):
         rel = w.relative_to(folder).as_posix()
         key = KEYS[i] if i < len(KEYS) else ""
         label = html.escape(rel)
-        pads.append(f'<button title="{label}"><b>{html.escape(key.upper())}</b>{label}</button>')
+        reasons = flags.get(rel)
+        mark = ' <span style="color:#e6a23c">&#9888; ' + html.escape(", ".join(reasons)) + "</span>" if reasons else ""
+        tip = html.escape(rel + (" | review: " + ", ".join(reasons) if reasons else ""))
+        pads.append(f'<button title="{tip}"><b>{html.escape(key.upper())}</b>{label}{mark}</button>')
         src = urllib.parse.quote(rel)
         audios.append(f'<audio id="a{i}" src="{src}" preload="none"></audio>')
     out = folder / "padboard.html"
