@@ -13,8 +13,31 @@ from typing import Optional
 import typer
 from rich.console import Console
 from rich.table import Table
+from typer.core import TyperGroup
 
 from grepchopflip import __version__
+
+
+def _normalize_json_flag(args: list[str]) -> list[str]:
+    """`--json=summary` -> `--json`, `--json=full` -> `--json --json-full` (brief section 8). A plain `--json`
+    stays a flag, so `gcf run --json song.wav` never swallows the song as the flag's value."""
+    out: list[str] = []
+    for i, x in enumerate(args):
+        if x == "--":
+            return out + args[i:]
+        if x == "--json=summary":
+            out.append("--json")
+        elif x == "--json=full":
+            out += ["--json", "--json-full"]
+        else:
+            out.append(x)
+    return out
+
+
+class _GcfGroup(TyperGroup):
+    def parse_args(self, ctx, args):  # type: ignore[override]
+        return super().parse_args(ctx, _normalize_json_flag(list(args)))
+
 
 app = typer.Typer(
     name="gcf",
@@ -22,6 +45,7 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
     rich_markup_mode="rich",
+    cls=_GcfGroup,
 )
 
 err = Console(stderr=True)
@@ -51,13 +75,42 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+_PROGRESS_HELP = "Progress on stderr: auto (bar on a terminal, else lines), bar, lines (`stage=chop pct=42 eta=31`), none."
+
+
 @app.callback()
 def main(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False, "--version", callback=_version_callback, is_eager=True, help="Print version and exit."
     ),
+    as_json: bool = typer.Option(False, "--json", help="[run] JSON summary on stdout (--json=full adds the index)."),
+    json_full: bool = typer.Option(False, "--json-full", hidden=True),
+    plain: bool = typer.Option(False, "--plain", help="[run] No colors or bars; plain text on stderr."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="[run] Only errors and the result."),
+    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="[run] More detail on stderr."),
+    no_input: bool = typer.Option(False, "--no-input", help="Never prompt (gcf never does; implied when stdout "
+                                                            "is not a terminal)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="[run] Print the plan; change nothing."),
+    config: Optional[Path] = typer.Option(None, "--config", help="[run] Use this config file instead of "
+                                                                 "gcf.toml / ~/.config/gcf/config.toml."),
+    cache_dir: Optional[Path] = typer.Option(None, "--cache-dir", help="Model cache folder (default: "
+                                                                       "$GCF_CACHE_DIR or ~/.cache/gcf)."),
+    progress: Optional[str] = typer.Option(None, "--progress", help=_PROGRESS_HELP),
 ) -> None:
+    """Global flags go before the command (`gcf --quiet run song.wav`); `run` also accepts them after it."""
     _utf8_streams()
+    if cache_dir is not None:
+        import os
+
+        os.environ["GCF_CACHE_DIR"] = str(cache_dir.expanduser())
+    if ctx.invoked_subcommand not in (None, "run") and (as_json or json_full or dry_run):
+        err.print(f"error: put --json / --dry-run after the command (`gcf {ctx.invoked_subcommand} ... --json`)",
+                  highlight=False, markup=False)
+        raise typer.Exit(EXIT_USAGE)
+    ctx.obj = {"json": as_json, "json_full": json_full, "plain": plain, "quiet": quiet, "verbose": verbose,
+               "no_input": no_input or not sys.stdout.isatty(), "dry_run": dry_run, "config": config,
+               "cache_dir": cache_dir, "progress": progress}
 
 
 @app.command()
@@ -453,6 +506,51 @@ def index(
         print(f"index: {'valid' if v['valid'] else 'invalid'}  {v['samples']} samples")
     if not v["valid"]:
         raise typer.Exit(EXIT_INPUT)
+
+
+@app.command()
+def run(
+    ctx: typer.Context,
+    song: Path = typer.Argument(..., help="Song file (wav, flac, aiff, mp3, m4a, ogg) or an existing song folder."),
+    out: Optional[Path] = typer.Option(None, "-o", "--out", help="Song folder (default: <library>/<song>-<hash8>)."),
+    library: Optional[Path] = typer.Option(None, "--library", help="Library folder holding one folder per song "
+                                           "(default: $GCF_LIBRARY, gcf.toml, or ~/Music/gcf-library). -o wins."),
+    fast: Optional[bool] = typer.Option(None, "--fast/--no-fast", help="Faster separation model (lower quality)."),
+    device: Optional[str] = typer.Option(None, "--device", help="cuda (default) or cpu."),
+    sensitivity: Optional[float] = typer.Option(None, "--sensitivity", help="Onset sensitivity 0..1 (default 0.5)."),
+    extras: Optional[str] = typer.Option(None, "--extras", help="Chop extras: words and/or notes (comma-separated)."),
+    tag: Optional[bool] = typer.Option(None, "--tag/--no-tag", help="Enrich: instrument tagging (extra `tag`)."),
+    embed: Optional[bool] = typer.Option(None, "--embed/--no-embed", help="Enrich: CLAP embeddings (extra `embed`)."),
+    bit_depth: Optional[int] = typer.Option(None, "--bit-depth", help="Organized files: 24 (default) or 16."),
+    force: bool = typer.Option(False, "--force", help="Redo every stage even if finished."),
+    as_json: bool = typer.Option(False, "--json", help="JSON summary on stdout (--json=full adds the whole index)."),
+    json_full: bool = typer.Option(False, "--json-full", hidden=True),
+    plain: bool = typer.Option(False, "--plain", help="No colors or bars; plain text on stderr."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Only errors and the result."),
+    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="More detail on stderr."),
+    no_input: bool = typer.Option(False, "--no-input", help="Never prompt (gcf never does)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan and a rough sample estimate; change nothing."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Config file to use instead of the discovered ones."),
+    cache_dir: Optional[Path] = typer.Option(None, "--cache-dir", help="Model cache folder."),
+    progress: Optional[str] = typer.Option(None, "--progress", help=_PROGRESS_HELP),
+) -> None:
+    """Separate, analyze, chop, organize (and enrich when installed) in one go. Reruns skip finished stages;
+    a failed stage is reported and the rest still runs (exit 10)."""
+    from grepchopflip.pipeline import run_from_cli
+
+    g = ctx.obj or {}
+    a = {
+        "song": song, "out": out, "library": library, "fast": fast, "device": device, "sensitivity": sensitivity,
+        "extras": extras, "tag": tag, "embed": embed, "bit_depth": bit_depth, "force": force,
+        "json": as_json or g.get("json"), "json_full": json_full or g.get("json_full"),
+        "plain": plain or g.get("plain"), "quiet": quiet or g.get("quiet"),
+        "verbose": verbose + int(g.get("verbose") or 0), "no_input": no_input or g.get("no_input", True),
+        "dry_run": dry_run or g.get("dry_run"), "config": config or g.get("config"),
+        "cache_dir": cache_dir or g.get("cache_dir"), "progress": progress or g.get("progress"),
+    }
+    code = run_from_cli(a)
+    if code:
+        raise typer.Exit(code)
 
 
 if __name__ == "__main__":  # pragma: no cover
