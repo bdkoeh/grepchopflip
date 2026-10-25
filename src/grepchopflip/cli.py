@@ -32,6 +32,7 @@ EXIT_USAGE = 2
 EXIT_INPUT = 3
 EXIT_MISSING_DEP = 4
 EXIT_GPU = 5
+EXIT_MODEL = 5  # model download failure (same number as GPU problems, per slice 3 spec)
 EXIT_NOTHING = 6
 EXIT_PARTIAL = 10
 
@@ -155,6 +156,65 @@ def separate(
             p1, p2 = s.get("pass1", {}), s.get("pass2", {})
             tag = " (recorded)" if result["cached"] else ""
             print(f"pass 1: {p1.get('separate_s', '?')}s, pass 2: {p2.get('separate_s', '?')}s{tag}")
+
+
+@app.command()
+def analyze(
+    path: Path = typer.Argument(..., help="Song file, or an existing output folder (source.json / stems/)."),
+    out: Optional[Path] = typer.Option(None, "-o", "--out", help="Output folder (default: out/<song> or the given folder)."),
+    bpm: Optional[float] = typer.Option(None, "--bpm", help="Override the tempo (recorded as an override)."),
+    key: Optional[str] = typer.Option(None, "--key", help="Override the key, e.g. 'A minor' or 'F#m'."),
+    force: bool = typer.Option(False, "--force", help="Recompute even if cached."),
+    as_json: bool = typer.Option(False, "--json", help="Print the analysis as JSON on stdout."),
+) -> None:
+    """Tempo, beats, bars and key; writes analysis.json."""
+    import contextlib
+
+    from grepchopflip.key import parse_key
+
+    # Validate options before any heavy import or work.
+    if bpm is not None and not (bpm > 0 and bpm < 1000):
+        err.print("error: --bpm must be a positive number (below 1000)", highlight=False, markup=False)
+        raise typer.Exit(EXIT_USAGE)
+    if key is not None:
+        try:
+            parse_key(key)
+        except ValueError as e:
+            err.print(f"error: --key: {e}", highlight=False, markup=False)
+            raise typer.Exit(EXIT_USAGE)
+
+    from grepchopflip.analyze import analyze as run_analyze
+    from grepchopflip.beats import AudioReadError
+
+    try:
+        # Libraries that print would corrupt the stdout contract; send their output to stderr.
+        with contextlib.redirect_stdout(sys.stderr):
+            result = run_analyze(path, out_dir=out, bpm_override=bpm, key_override=key, force=force)
+    except AudioReadError as e:
+        err.print(f"error: {e}", highlight=False, markup=False)
+        raise typer.Exit(EXIT_INPUT)
+    except RuntimeError as e:
+        # ModelDownloadError, ModelLoadError, torch / CUDA errors (incl. out-of-memory)
+        err.print(f"error: {type(e).__name__}: {e}", highlight=False, markup=False)
+        raise typer.Exit(EXIT_MODEL)
+
+    if as_json:
+        print(json.dumps(result, indent=2))
+        return
+
+    bpm_v = result["bpm"]
+    flag = "" if result["tempo_reliable"] else "  (tempo unreliable)"
+    print(f"bpm: {bpm_v}  confidence {result['bpm_confidence']:.2f}{flag}" if bpm_v else "bpm: unknown (tempo unreliable)")
+    print(f"meter: {result['beats_per_bar'] or '?'} beats/bar, {len(result['beats_s'])} beats, "
+          f"{len(result['downbeats_s'])} downbeats")
+    if result["key"]:
+        alt = result["key_alternative"]
+        print(f"key: {result['key']} {result['mode']}  confidence {result['key_confidence']:.2f}"
+              f"  (relative: {alt['key']} {alt['mode']})")
+    else:
+        print("key: unknown (not reliable)")
+    if result["overrides"]:
+        print("overrides: " + ", ".join(f"{k}={v}" for k, v in result["overrides"].items()))
 
 
 if __name__ == "__main__":  # pragma: no cover
