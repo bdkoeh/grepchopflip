@@ -105,7 +105,7 @@ def info(
 @app.command()
 def separate(
     audio: Path = typer.Argument(..., help="Song to split (wav, flac, aiff, mp3, m4a, ogg)."),
-    out: Optional[Path] = typer.Option(None, "-o", "--out", help="Output folder. Default: ./out/<song-slug>"),
+    out: Optional[Path] = typer.Option(None, "-o", "--out", help="Output folder. Default: ./out/<song-name>-<hash8>"),
     fast: bool = typer.Option(False, "--fast", help="Use the faster htdemucs model (lower quality)."),
     device: str = typer.Option("cuda", "--device", help="cuda or cpu."),
     force: bool = typer.Option(False, "--force", help="Ignore the cache and rerun both passes."),
@@ -117,14 +117,12 @@ def separate(
 
     from rich.logging import RichHandler
 
-    from grepchopflip import audio_io
     from grepchopflip import separate as sep_mod
+    from grepchopflip.errors import InputError, MissingDependencyError, SeparationError
 
     if device not in ("cuda", "cpu"):
         err.print(f"[red]![/] --device must be cuda or cpu, not {device!r}")
         raise typer.Exit(EXIT_USAGE)
-
-    out_dir = out if out is not None else Path("out") / sep_mod.slugify(audio.name)
 
     handler = RichHandler(console=err, show_path=False, show_time=False, markup=False)
     pkg_log = logging.getLogger("grepchopflip")
@@ -133,11 +131,14 @@ def separate(
     try:
         # Libraries sometimes print; keep stdout reserved for our result.
         with contextlib.redirect_stdout(sys.stderr):
-            result = sep_mod.separate(audio, out_dir, fast=fast, device=device, force=force)
-    except audio_io.InputError as e:
+            result = sep_mod.separate(audio, out, fast=fast, device=device, force=force)
+    except InputError as e:
         err.print(f"[red]![/] {e}")
         raise typer.Exit(EXIT_INPUT)
-    except sep_mod.SeparationError as e:
+    except MissingDependencyError as e:
+        err.print(f"[red]![/] {e}")
+        raise typer.Exit(EXIT_MISSING_DEP)
+    except SeparationError as e:
         err.print(f"[red]![/] {e}")
         raise typer.Exit(EXIT_GPU)
     finally:

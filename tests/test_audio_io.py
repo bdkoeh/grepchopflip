@@ -54,6 +54,16 @@ def test_ffmpeg_decode(tmp_path, codec, ext):
     assert not kept.exists()  # temp decode removed
 
 
+def test_missing_ffmpeg_is_missing_dependency(tmp_path, monkeypatch):
+    from grepchopflip.errors import MissingDependencyError
+
+    f = tmp_path / "x.mp3"
+    f.write_bytes(b"whatever")
+    monkeypatch.setattr(audio_io.shutil, "which", lambda name: None)
+    with pytest.raises(MissingDependencyError):
+        audio_io.probe(f)
+
+
 def test_missing_and_garbage(tmp_path):
     with pytest.raises(audio_io.InputError):
         audio_io.probe(tmp_path / "nope.wav")

@@ -1,8 +1,10 @@
 """Per-stage done files.
 
-A stage directory holds a `.done.json` recording the input hash, a hash of the stage parameters and the
-versions that produced the output. A stage is skipped only if all three match and the declared output
-files still exist.
+A stage directory holds a `.done.json` recording the input hash and a hash of the stage settings. A stage
+is skipped only if both match and every declared output file still exists. The settings hashed are
+whatever the caller passes as `params` (for separation: model names, audio-separator version, output
+format version, ...), so changing any of them forces a rerun. The `versions` mapping is stored for
+diagnosis only and is NOT part of the hash.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ DONE_NAME = ".done.json"
 
 
 def param_hash(params: dict[str, Any]) -> str:
-    """Stable short hash of JSON-serializable parameters (includes model names and versions)."""
+    """Stable short hash of JSON-serializable parameters."""
     blob = json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
