@@ -60,7 +60,7 @@ from grepchopflip.errors import InputError
 
 log = logging.getLogger(__name__)
 
-CHOP_FORMAT_VERSION = "drums-3"   # drums-3: boundaries at the pre-attack minimum, not the 15 % point
+CHOP_FORMAT_VERSION = "drums-4"   # drums-4: audible-attack boundaries, tiered grid correction, 4 % loop tolerance
 PARTS = ("kick", "snare", "toms", "hh", "ride", "crash")
 GRID_PARTS = ("kick", "snare")     # hits used to correct the downbeats (toms/crash snapped to fills; lead 2026-10-25)
 LOOP_BARS = (1, 2, 4)
@@ -97,9 +97,11 @@ HOP = 256
 
 LOOP_SILENT_DBFS = -50.0
 LOOP_FADE_MS = 1.5
-LOOP_LENGTH_TOL = 0.08
-GRID_WINDOW_S = 0.045       # look back this far for the pre-attack point (tracker lags up to ~20 ms, plus the
-                            # ramp before the 15 % point); forwards only window/4 (tracker never leads)
+LOOP_LENGTH_TOL = 0.04      # drop loops more than this off the nominal bar length (a played bar varies ~1.5 %)
+LOOP_LENGTH_WARN = 0.02     # flag loops between WARN and TOL
+GRID_WINDOW_S = 0.070       # look back this far for a hit (tracker lag reached 50 ms on a normalized grid;
+                            # still well under a 16th note at 80 BPM = 190 ms)
+GRID_AFTER_S = 0.012        # forwards only this much (trackers lag, they don't lead)
 GRID_CONSISTENCY_MIN = 0.8
 RANKING = "std_of_per_beat_rms_db"
 
@@ -137,6 +139,9 @@ def _settings(sensitivity: float) -> dict:
         "loop_fade_ms": LOOP_FADE_MS,
         "loop_length_tol": LOOP_LENGTH_TOL,
         "grid_window_s": GRID_WINDOW_S,
+        "grid_after_s": GRID_AFTER_S,
+        "loop_length_tol": [LOOP_LENGTH_TOL, LOOP_LENGTH_WARN],
+        "grid_tiers": ["kick_snare", "other_parts", "review_hits"],
         "pre_attack_ms": PRE_ATTACK_MS,
         "pre_attack_rel_db": PRE_ATTACK_REL_DB,
         "grid_consistency_min": GRID_CONSISTENCY_MIN,
@@ -306,15 +311,30 @@ def _chop_part(part: str, y: np.ndarray, sr: int, sensitivity: float,
 
 # ----------------------------------------------------------------------------- loops
 
-def _grid(analysis: dict, onsets_s: list[float]) -> dict:
+def _grid(analysis: dict, tiers: list[tuple[str, list[float]]]) -> dict:
+    """Correct each tracked downbeat to the nearest hit, trying onset tiers in order (kick/snare first,
+    then the other parts, then review-flagged hits). A downbeat that no tier can place stays at the
+    tracked time and is recorded with source "tracked" so loops using it get flagged."""
     tracked = [float(x) for x in analysis.get("downbeats_s", [])]
-    # onsets_s are already pre-attack minima, so no extra pre-roll here
-    corrected = common.corrected_downbeats(tracked, onsets_s, GRID_WINDOW_S, 0.0) \
-        if onsets_s else list(tracked)
+    corrected = list(tracked)
+    source = ["tracked"] * len(tracked)
+    for name, onsets_s in tiers:
+        if not onsets_s:
+            continue
+        pending = [i for i, s in enumerate(source) if s == "tracked"]
+        if not pending:
+            break
+        moved = common.corrected_downbeats([tracked[i] for i in pending], onsets_s, GRID_WINDOW_S, 0.0,
+                                           after_s=GRID_AFTER_S)
+        for i, m in zip(pending, moved):
+            if abs(m - tracked[i]) > 1e-9:
+                corrected[i] = m
+                source[i] = name
     return {
         "downbeats_s_tracked": [round(x, 6) for x in tracked],
         "downbeats_s_corrected": [round(x, 6) for x in corrected],
         "offsets_ms": [round((c - t) * 1000, 3) for c, t in zip(corrected, tracked)],
+        "correction_source": source,
         "beats_per_bar": int(analysis.get("beats_per_bar") or 4),
         "bpm": analysis.get("bpm"),
         "source": "drums",
@@ -350,11 +370,18 @@ def _loop_chops(drums: np.ndarray, sr: int, analysis: dict, grid: dict, dropped:
         if e > len(drums) or e - s < 2:
             continue
         dur = (e - s) / sr
+        reasons = list(gate)
         if bpm:
             exp = nbars * bpb * 60.0 / float(bpm)
-            if abs(dur - exp) / exp > LOOP_LENGTH_TOL:
+            dev = abs(dur - exp) / exp
+            if dev > LOOP_LENGTH_TOL:
                 dropped["off_length"] = dropped.get("off_length", 0) + 1
                 continue
+            if dev > LOOP_LENGTH_WARN:
+                reasons.append(f"length_off_{dev * 100:.1f}pct")
+        csrc = grid.get("correction_source")
+        if csrc and (csrc[i0] == "tracked" or csrc[i1] == "tracked"):
+            reasons.append("boundary_not_on_hit")     # tracker time only: edge may clip a hit
         seg = drums[s:e]
         r = common.rms_dbfs(seg)
         if r is None or r < LOOP_SILENT_DBFS:
@@ -363,7 +390,7 @@ def _loop_chops(drums: np.ndarray, sr: int, analysis: dict, grid: dict, dropped:
         edges = np.linspace(0, len(seg), nbars * bpb + 1).astype(int)
         beat_db = [20 * np.log10(max(float(np.sqrt(np.mean(np.square(seg[a:b])))) if b > a else 0.0, 1e-6))
                    for a, b in zip(edges[:-1], edges[1:])]
-        cand.append({"s": s, "e": e, "bars": nbars, "i0": i0, "dur": dur,
+        cand.append({"s": s, "e": e, "bars": nbars, "i0": i0, "i1": i1, "dur": dur, "reasons": reasons,
                      "seg": common.apply_fades(seg, sr, LOOP_FADE_MS, LOOP_FADE_MS),
                      "std": float(np.std(beat_db))})
     for nbars in LOOP_BARS:
@@ -384,11 +411,14 @@ def _loop_chops(drums: np.ndarray, sr: int, analysis: dict, grid: dict, dropped:
             channels=c["seg"].shape[1], sample_rate=sr, bars=c["bars"],
             start_beat=start_beat, length_beats=length_beats,
             peak_dbfs=common.peak_dbfs(c["seg"]), rms_dbfs=common.rms_dbfs(c["seg"]),
-            needs_review=bool(gate), zero_snapped=True, fade_in_ms=LOOP_FADE_MS, fade_out_ms=LOOP_FADE_MS,
+            needs_review=bool(c["reasons"]), zero_snapped=True, fade_in_ms=LOOP_FADE_MS, fade_out_ms=LOOP_FADE_MS,
             extra={"start_sample": c["s"], "end_sample": c["e"], "rank": c["rank"],
                    "beat_rms_std_db": round(c["std"], 3), "loop_bpm": round(60.0 * length_beats / c["dur"], 3),
                    "downbeat_tracked_s": tracked[c["i0"]], "downbeat_corrected_s": corrected[c["i0"]],
-                   "review_reasons": list(gate)},
+                   "end_downbeat_corrected_s": corrected[c["i1"]],
+                   "boundary_sources": [grid.get("correction_source", ["?"] * len(corrected))[c["i0"]],
+                                        grid.get("correction_source", ["?"] * len(corrected))[c["i1"]]],
+                   "review_reasons": c["reasons"]},
             source_file=src[0], source_sha256=src[1], bit_depth=24, bar=c["i0"] + 1,
         )
         chop.extra["_audio"] = c["seg"]
@@ -479,7 +509,9 @@ def chop_drums(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> 
 
     chops: list[Chop] = []
     dropped: dict[str, dict[str, int]] = {}
-    grid_onsets: list[float] = []
+    grid_onsets: list[float] = []          # kick/snare, clean
+    grid_onsets_other: list[float] = []    # toms/hh/ride/crash, clean
+    grid_onsets_review: list[float] = []   # any part, review-flagged
     n_shot = 0
     for part, path in part_paths.items():
         y, sr = common.load_stem(path)
@@ -495,8 +527,13 @@ def chop_drums(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> 
             rpath = f"chops/drums/{'review' if review else 'oneshots'}/{part}/{part}_{k:04d}.wav"
             common.write_chop(out_dir / rpath, h["audio"], sr)
             att_s = h["attack"] / sr
-            if part in GRID_PARTS:
-                grid_onsets.append(h["pre_attack"] / sr)   # loops cut at the quiet point before the hit
+            q_s = h["pre_attack"] / sr                      # loops cut at the start of the audible attack
+            if review:
+                grid_onsets_review.append(q_s)
+            elif part in GRID_PARTS:
+                grid_onsets.append(q_s)
+            else:
+                grid_onsets_other.append(q_s)
             beats = np.asarray(analysis.get("beats_s", []), dtype=float)
             dbs = np.asarray(analysis.get("downbeats_s", []), dtype=float)
             start_beat = bar = None
@@ -521,7 +558,8 @@ def chop_drums(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> 
     median_offset = None
     if make_loops:
         drums, sr = common.load_stem(drums_path)
-        grid = _grid(analysis, sorted(grid_onsets))
+        grid = _grid(analysis, [("kick_snare", sorted(grid_onsets)), ("other_parts", sorted(grid_onsets_other)),
+                                ("review_hits", sorted(grid_onsets_review))])
         moved = [o for o, t, c in zip(grid["offsets_ms"], grid["downbeats_s_tracked"],
                                       grid["downbeats_s_corrected"]) if abs(o) > 1e-9]
         median_offset = round(float(np.median(grid["offsets_ms"])), 3) if grid["offsets_ms"] else None
