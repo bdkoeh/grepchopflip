@@ -217,5 +217,79 @@ def analyze(
         print("overrides: " + ", ".join(f"{k}={v}" for k, v in result["overrides"].items()))
 
 
+from grepchopflip.chop.drums import chop_drums  # noqa: E402
+
+# Stem name -> chopper(out_dir, sensitivity=..., force=...) -> summary dict. Slice 5 adds the other stems.
+CHOPPERS = {"drums": chop_drums}
+ALL_CHOP_STEMS = ("drums", "bass", "other", "vocals")
+
+
+@app.command()
+def chop(
+    out_dir: Path = typer.Argument(..., help="Output folder produced by `gcf separate` + `gcf analyze`."),
+    stems: str = typer.Option("drums", "--stems", help="Comma-separated stems to chop: drums,bass,other,vocals."),
+    sensitivity: float = typer.Option(0.5, "--sensitivity", help="Onset sensitivity 0..1 (higher = more slices)."),
+    force: bool = typer.Option(False, "--force", help="Redo even if cached."),
+    as_json: bool = typer.Option(False, "--json", help="Print a JSON summary on stdout."),
+) -> None:
+    """Cut stems into one-shots and loops (drums: per-part hits and 1/2/4-bar loops)."""
+    import contextlib
+    import logging
+
+    from rich.logging import RichHandler
+
+    from grepchopflip.errors import InputError
+
+    wanted = [s.strip() for s in stems.split(",") if s.strip()]
+    bad = [s for s in wanted if s not in ALL_CHOP_STEMS]
+    if not wanted or bad:
+        err.print(f"error: --stems must be from {', '.join(ALL_CHOP_STEMS)}"
+                  + (f" (got {', '.join(bad)})" if bad else ""), highlight=False, markup=False)
+        raise typer.Exit(EXIT_USAGE)
+    if not (0.0 <= sensitivity <= 1.0):
+        err.print("error: --sensitivity must be between 0 and 1", highlight=False, markup=False)
+        raise typer.Exit(EXIT_USAGE)
+    if not out_dir.is_dir():
+        err.print(f"error: {out_dir} is not a folder", highlight=False, markup=False)
+        raise typer.Exit(EXIT_INPUT)
+
+    handler = RichHandler(console=err, show_path=False, show_time=False, markup=False)
+    pkg_log = logging.getLogger("grepchopflip")
+    pkg_log.addHandler(handler)
+    pkg_log.setLevel(logging.INFO)
+    results: dict[str, dict] = {}
+    skipped: list[str] = []
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            for name in wanted:
+                fn = CHOPPERS.get(name)
+                if fn is None:
+                    err.print(f"{name}: not implemented in this build, skipped", highlight=False, markup=False)
+                    skipped.append(name)
+                    continue
+                results[name] = fn(out_dir, sensitivity=sensitivity, force=force)
+    except InputError as e:
+        err.print(f"error: {e}", highlight=False, markup=False)
+        raise typer.Exit(EXIT_INPUT)
+    finally:
+        pkg_log.removeHandler(handler)
+
+    if not results:
+        raise typer.Exit(EXIT_NOTHING)
+
+    if as_json:
+        print(json.dumps({"out_dir": str(out_dir), "stems": results, "skipped": skipped}, indent=2))
+        return
+    for name, r in results.items():
+        print(f"{name}: {'cached' if r['cached'] else 'written'}  {r['paths']['chops_dir']}")
+        if "parts" in r:
+            for part, c in r["parts"].items():
+                print(f"  {part}: {c['oneshots']} hits ({c['review']} to review)")
+            if r["loops"]:
+                print("  loops: " + ", ".join(f"{k}-bar x{v}" for k, v in sorted(r["loops"].items())))
+            elif r["loops_skipped"]:
+                print(f"  loops skipped: {r['loops_skipped']}")
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()
