@@ -81,7 +81,8 @@ QUIET_REL_DB = {"kick": -36.0, "snare": -36.0, "toms": -30.0, "hh": -26.0, "ride
 
 MIN_SLICE_MS = 30.0
 PREROLL_MS = 1.5            # the 1 ms fade-in plus margin finishes before the attack
-PRE_ATTACK_MS = 15.0        # look this far before the 15 % point for the envelope minimum (cut there)
+PRE_ATTACK_MS = 15.0        # look at most this far before the 15 % point for the start of the audible attack
+PRE_ATTACK_REL_DB = -40.0   # "audible attack" starts where the level rises above peak + this
 SNAP_SEARCH = 16            # samples (0.36 ms), so start stays within 2 ms of the attack
 FADE_IN_MS, FADE_OUT_MS = 1.0, 8.0
 NORMALIZE_DBFS = -1.0
@@ -137,6 +138,7 @@ def _settings(sensitivity: float) -> dict:
         "loop_length_tol": LOOP_LENGTH_TOL,
         "grid_window_s": GRID_WINDOW_S,
         "pre_attack_ms": PRE_ATTACK_MS,
+        "pre_attack_rel_db": PRE_ATTACK_REL_DB,
         "grid_consistency_min": GRID_CONSISTENCY_MIN,
         "ranking": RANKING,
     }
@@ -171,19 +173,24 @@ def _refine_start(absy: np.ndarray, env_fast: np.ndarray, onset: int, lo_bound: 
     return i
 
 
-def _pre_attack(env_fast: np.ndarray, attack: int, lo_bound: int, sr: int, max_ms: float = 15.0) -> int:
-    """Quiet point just before a hit: the envelope minimum in the `max_ms` before `attack`. Loop
-    boundaries and one-shot starts cut here, so the whole attack ramp (not just the part above 15 % of
-    peak) belongs to the hit that follows, never to the loop or slice before it."""
+def _pre_attack(env_fast: np.ndarray, attack: int, lo_bound: int, sr: int, max_ms: float = 15.0,
+                peak: float | None = None) -> int:
+    """Start of the audible attack: walking back from the 15 % point, the last sample whose level is
+    still at least `PRE_ATTACK_REL_DB` below the hit's peak (at most `max_ms` back). Separated drum
+    hits carry a soft ~−50 dB lead-in for ~10 ms before the transient; cutting at the envelope minimum
+    would put that silence at the start of every loop and one-shot and make the downbeat land late.
+    Loop boundaries and one-shot starts cut here, so the audible attack belongs to the hit that
+    follows, never to the loop or slice before it."""
     a = max(lo_bound, attack - int(max_ms / 1000 * sr), 0)
     if attack <= a:
         return attack
-    seg = env_fast[a:attack + 1]
-    m = float(seg.min())
-    # the LAST point of the quiet floor: on a silent run-up this is right before the ramp starts,
-    # on noisy real audio it is the local minimum closest to the attack
-    quiet = np.where(seg <= m * 1.05 + 1e-7)[0]
-    return a + int(quiet[-1])
+    if peak is None:
+        peak = float(env_fast[attack:attack + int(0.030 * sr)].max()) if attack < len(env_fast) else 0.0
+    thr = peak * 10 ** (PRE_ATTACK_REL_DB / 20)
+    i = attack
+    while i > a and env_fast[i - 1] >= thr:
+        i -= 1
+    return i
 
 
 def _moving_max(x: np.ndarray, size: int) -> np.ndarray:
