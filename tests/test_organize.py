@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from dataclasses import asdict
 import shutil
 
@@ -86,7 +87,7 @@ def test_info_chunk_reads_back(song):
     with sf.SoundFile(str(song / s["path"])) as f:
         md = f.copy_metadata()
     assert md["title"] == "Bass_01_F1"
-    assert md["artist"] == "My_Song.wav"
+    assert md["artist"] == "My Song" == _index(song)["source"]["title"]
     assert md["software"].startswith("gcf 0.1")
     assert md["comment"] == "id=bass_0001 root=F1"
     loop = _by_id(song)["drums_loop_0001"]
@@ -221,6 +222,208 @@ def test_cli_organize_json_and_exit_codes(song, tmp_path):
     assert run.invoke(app, ["organize", str(empty)]).exit_code == 3
     plain = run.invoke(app, ["organize", str(song)])
     assert plain.exit_code == 0 and "organize: cached" in plain.stdout and "oneshots/kick: 1" in plain.stdout
+
+
+def _record_paths(song):
+    return [c["path"] for p in (song / "chops").rglob("chops*.json") for c in json.loads(p.read_text())["chops"]]
+
+
+def _leftovers(song):
+    return [p for p in song.rglob("*") if p.name.endswith((".gcf-tmp", ".gcf-old"))]
+
+
+def test_failure_midway_strands_nothing_and_a_rerun_completes(tmp_path, monkeypatch):
+    song = make_song(tmp_path / "s")
+    orig, calls = os.replace, {"n": 0}
+
+    def flaky(a, b):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise OSError("disk full")
+        return orig(a, b)
+
+    monkeypatch.setattr(os, "replace", flaky)
+    with pytest.raises(org.PartialOrganize):
+        org.organize(song)
+    monkeypatch.setattr(os, "replace", orig)
+    # every original is still there and every record still points at a file that exists
+    assert all((song / p).is_file() for p in _record_paths(song))
+    assert all(p.startswith("chops/") for p in _record_paths(song))
+    assert not _leftovers(song)
+    r = org.organize(song)
+    assert not r["problems"] and tree(song) == sorted(EXPECTED)
+    assert all((song / p).is_file() for p in _record_paths(song)) and not _leftovers(song)
+    assert org.organize(song)["cached"] is True
+
+
+def test_failure_while_writing_cleans_up_temps(tmp_path, monkeypatch):
+    song = make_song(tmp_path / "s")
+    real, n = org.write_clip, {"n": 0}
+
+    def flaky(*a, **k):
+        n["n"] += 1
+        if n["n"] == 4:
+            raise OSError("no space left")
+        return real(*a, **k)
+
+    monkeypatch.setattr(org, "write_clip", flaky)
+    with pytest.raises(OSError):
+        org.organize(song)
+    assert not _leftovers(song) and all((song / p).is_file() for p in _record_paths(song))
+    assert not [p for p in tree(song) if not p.startswith("chops/")]
+
+
+def test_leftover_temp_files_are_swept_at_startup(song):
+    stray = song / "oneshots" / "kick" / "Kick_09.wav.gcf-tmp"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b"half")
+    org.organize(song)
+    assert not stray.exists()
+
+
+def test_stale_sweep_only_deletes_organized_wavs_inside_the_song(tmp_path):
+    victim = tmp_path / "victim.wav"
+    victim.write_bytes(b"keep me")
+    note = tmp_path / "s" / "notes.txt"
+    song = make_song(tmp_path / "s")
+    org.organize(song)
+    note.write_text("x")
+    idx = _index(song)
+    idx["samples"][0]["path"] = str(victim)                  # absolute path in index.json
+    (song / "index.json").write_text(json.dumps(idx))
+    st = json.loads((song / ".organize.json").read_text())
+    for bad in (str(victim), "../victim.wav", "chops/../../victim.wav", "stems/drums.wav", "notes.txt"):
+        st["files"][bad] = {}
+    st["pending"] = [str(victim), "../victim.wav", "oneshots/../../victim.wav"]
+    (song / ".organize.json").write_text(json.dumps(st))
+    org.organize(song, force=True)
+    assert victim.read_bytes() == b"keep me" and note.read_text() == "x"
+    assert not org._deletable(song, str(victim)) and not org._deletable(song, "../victim.wav")
+    assert not org._deletable(song, "oneshots/kick/x.txt") and org._deletable(song, "oneshots/kick/x.wav")
+
+
+def test_16_bit_is_one_way(tmp_path):
+    song = make_song(tmp_path / "s")
+    org.organize(song, bit_depth=16)
+    snap = {p: (song / p).read_bytes() for p in tree(song)}
+    with pytest.raises(org.InputError, match="organized at 16-bit; run `gcf chop --force` then"):
+        org.organize(song, bit_depth=24)
+    with pytest.raises(org.InputError):
+        org.organize(song, bit_depth=24, force=True)
+    res = CliRunner().invoke(app, ["organize", str(song), "--bit-depth", "24"])
+    assert res.exit_code == 3 and "organized at 16-bit" in res.output and "Traceback" not in res.output
+    assert {p: (song / p).read_bytes() for p in tree(song)} == snap
+    # after a re-chop (records back under chops/), 24-bit is fine again
+    shutil.rmtree(song / "chops")
+    make_song(song)
+    r = org.organize(song, bit_depth=24)
+    assert r["bit_depth"] == 24 and not r["problems"]
+    assert {sf.info(str(song / p)).subtype for p in tree(song)} == {"PCM_24"}
+    assert "--bit-depth" in CliRunner().invoke(app, ["organize", "--help"]).output
+
+
+def test_cli_turns_io_errors_into_exit_codes(song, monkeypatch):
+    run = CliRunner()
+
+    def disk_full(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(org, "organize", disk_full)
+    res = run.invoke(app, ["organize", str(song)])
+    assert res.exit_code == 3 and "disk full" in res.output and isinstance(res.exception, SystemExit)
+
+    def partial(*a, **k):
+        raise org.PartialOrganize("3 of 16 files were placed")
+
+    monkeypatch.setattr(org, "organize", partial)
+    assert run.invoke(app, ["organize", str(song)]).exit_code == 10
+    monkeypatch.setattr(org, "rebuild_index", disk_full)
+    res = run.invoke(app, ["index", str(song)])
+    assert res.exit_code == 3 and isinstance(res.exception, SystemExit)
+
+
+def test_cli_unreadable_audio_is_exit_3_without_traceback(song):
+    (song / "chops/bass/oneshots/bass_0001.wav").write_bytes(b"not a wav at all")
+    res = CliRunner().invoke(app, ["organize", str(song)])
+    assert res.exit_code == 3 and "Traceback" not in res.output and isinstance(res.exception, SystemExit)
+    assert not _leftovers(song)
+
+
+def test_collision_suffix_starts_at_a_and_respects_the_length_cap():
+    used = {"loops/x/foo.wav"}
+    assert org.unique_rel("loops/x", "foo", used) == "loops/x/foo_a.wav"
+    used.add("loops/x/foo_a.wav")
+    assert org.unique_rel("loops/x", "foo", used) == "loops/x/foo_b.wav"
+    assert org.unique_rel("loops/x", "bar", used) == "loops/x/bar.wav"
+    long = "n" * 36
+    used = {f"d/{long}.wav".lower()}
+    rel = org.unique_rel("d", long, used)
+    assert rel.endswith("_a.wav") and len(rel.split("/")[1]) <= 40
+    used.add(rel)
+    assert len(org.unique_rel("d", long, used).split("/")[1]) <= 40
+
+
+def test_names_swapping_places_keep_each_hits_audio(tmp_path):
+    song = make_song(tmp_path / "s")
+    p = song / "chops/drums/chops.json"
+    doc = json.loads(p.read_text())
+    for c in doc["chops"]:
+        if c["id"] == "drums_oneshot_0002":
+            c["needs_review"] = False                         # both kicks kept: Kick_01 and Kick_02 share a folder
+    p.write_text(json.dumps(doc, indent=2))
+    org.organize(song)
+    s = _by_id(song)
+    assert s["drums_oneshot_0002"]["path"] == "oneshots/kick/Kick_01.wav"
+    assert s["drums_oneshot_0001"]["path"] == "oneshots/kick/Kick_02.wav"
+    audio = {cid: sf.read(str(song / s[cid]["path"]), dtype="int32", always_2d=True)[0]
+             for cid in ("drums_oneshot_0001", "drums_oneshot_0002")}
+    assert not np.array_equal(audio["drums_oneshot_0001"], audio["drums_oneshot_0002"])
+    doc = json.loads(p.read_text())
+    for c in doc["chops"]:                                     # swap their positions in the song
+        if c["id"] == "drums_oneshot_0001":
+            c["source_start_s"] = 1.0
+        if c["id"] == "drums_oneshot_0002":
+            c["source_start_s"] = 9.0
+    p.write_text(json.dumps(doc, indent=2))
+    r = org.organize(song)
+    assert not r["problems"] and r["cached"] is False
+    s2 = _by_id(song)
+    assert s2["drums_oneshot_0001"]["path"] == "oneshots/kick/Kick_01.wav"
+    assert s2["drums_oneshot_0002"]["path"] == "oneshots/kick/Kick_02.wav"
+    for cid, data in audio.items():
+        assert np.array_equal(sf.read(str(song / s2[cid]["path"]), dtype="int32", always_2d=True)[0], data)
+        with sf.SoundFile(str(song / s2[cid]["path"])) as f:
+            assert f.copy_metadata()["comment"].startswith(f"id={cid}")
+    assert not _leftovers(song) and org.organize(song)["cached"] is True
+
+
+def test_drums_stage_cache_stays_valid(tmp_path):
+    from test_drums import make_out
+    from grepchopflip.chop.drums import chop_drums
+
+    out = make_out(tmp_path)
+    first = chop_drums(out)
+    assert first["cached"] is False and first["oneshots_total"] > 0
+    r = org.organize(out)
+    assert r["samples"] == first["oneshots_total"] + sum(first["loops"].values()) and not r["problems"]
+    again = chop_drums(out)
+    assert again["cached"] is True
+    doc = json.loads((out / "chops/drums/chops.json").read_text())
+    assert all((out / c["path"]).is_file() and not c["path"].startswith("chops/") for c in doc["chops"])
+    # a forced re-chop followed by organize leaves exactly the new set
+    chop_drums(out, force=True)
+    org.organize(out)
+    assert sorted(tree(out)) == sorted(s["path"] for s in _index(out)["samples"])
+
+
+def test_library_flag_is_an_argument_not_an_env_mutation(monkeypatch, tmp_path):
+    from grepchopflip.config import library_dir
+
+    monkeypatch.delenv("GCF_LIBRARY", raising=False)
+    assert library_dir(tmp_path / "x") == tmp_path / "x"
+    monkeypatch.setenv("GCF_LIBRARY", str(tmp_path / "env"))
+    assert library_dir(tmp_path / "x") == tmp_path / "x" and library_dir() == tmp_path / "env"
+    assert os.environ["GCF_LIBRARY"] == str(tmp_path / "env")
 
 
 def test_library_dir(monkeypatch, tmp_path):

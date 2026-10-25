@@ -103,14 +103,6 @@ def info(
         raise typer.Exit(EXIT_GPU)
 
 
-def _apply_library(library: Optional[Path]) -> None:
-    """`--library DIR` is GCF_LIBRARY for this run (config.library_dir reads it)."""
-    if library is not None:
-        import os
-
-        os.environ["GCF_LIBRARY"] = str(library)
-
-
 @app.command()
 def separate(
     audio: Path = typer.Argument(..., help="Song to split (wav, flac, aiff, mp3, m4a, ogg)."),
@@ -134,7 +126,6 @@ def separate(
     if device not in ("cuda", "cpu"):
         err.print(f"[red]![/] --device must be cuda or cpu, not {device!r}")
         raise typer.Exit(EXIT_USAGE)
-    _apply_library(library)
 
     handler = RichHandler(console=err, show_path=False, show_time=False, markup=False)
     pkg_log = logging.getLogger("grepchopflip")
@@ -143,7 +134,7 @@ def separate(
     try:
         # Libraries sometimes print; keep stdout reserved for our result.
         with contextlib.redirect_stdout(sys.stderr):
-            result = sep_mod.separate(audio, out, fast=fast, device=device, force=force)
+            result = sep_mod.separate(audio, out, fast=fast, device=device, force=force, library=library)
     except InputError as e:
         err.print(f"[red]![/] {e}")
         raise typer.Exit(EXIT_INPUT)
@@ -185,7 +176,6 @@ def analyze(
 
     from grepchopflip.key import parse_key
 
-    _apply_library(library)
     # Validate options before any heavy import or work.
     if bpm is not None and not (bpm > 0 and bpm < 1000):
         err.print("error: --bpm must be a positive number (below 1000)", highlight=False, markup=False)
@@ -203,7 +193,8 @@ def analyze(
     try:
         # Libraries that print would corrupt the stdout contract; send their output to stderr.
         with contextlib.redirect_stdout(sys.stderr):
-            result = run_analyze(path, out_dir=out, bpm_override=bpm, key_override=key, force=force)
+            result = run_analyze(path, out_dir=out, bpm_override=bpm, key_override=key, force=force,
+                                library=library)
     except AudioReadError as e:
         err.print(f"error: {e}", highlight=False, markup=False)
         raise typer.Exit(EXIT_INPUT)
@@ -384,11 +375,14 @@ def _print_chop_results(results: dict) -> None:
 @app.command()
 def organize(
     song_dir: Path = typer.Argument(..., help="Song folder after `gcf chop`."),
-    bit_depth: int = typer.Option(24, "--bit-depth", help="Output bit depth: 24 (bit-exact) or 16 (TPDF dither)."),
+    bit_depth: int = typer.Option(24, "--bit-depth", help="Output bit depth: 24 (bit-exact) or 16 (TPDF dither). "
+                                  "16-bit is one-way: to go back to 24, run `gcf chop --force` first."),
     force: bool = typer.Option(False, "--force", help="Rewrite every file even if it is already in place."),
     as_json: bool = typer.Option(False, "--json", help="Print a JSON summary on stdout."),
 ) -> None:
     """Sort chops into oneshots/ loops/ phrases/ words/ review/ with short names, tag them, write index.json."""
+    import soundfile as sf
+
     from grepchopflip import organize as org
     from grepchopflip.errors import InputError
 
@@ -397,7 +391,11 @@ def organize(
         raise typer.Exit(EXIT_USAGE)
     try:
         r = org.organize(song_dir, bit_depth=bit_depth, force=force)
-    except InputError as e:
+    except org.PartialOrganize as e:
+        err.print(f"error: {e}; the chop records still point at the original files, run it again",
+                  highlight=False, markup=False)
+        raise typer.Exit(EXIT_PARTIAL)
+    except (InputError, OSError, sf.LibsndfileError) as e:
         err.print(f"error: {e}", highlight=False, markup=False)
         raise typer.Exit(EXIT_INPUT)
     for p in r["problems"]:
@@ -421,6 +419,8 @@ def index(
     as_json: bool = typer.Option(False, "--json", help="Print the result as JSON on stdout."),
 ) -> None:
     """Rebuild index.json from the current records (no files move); --validate only checks it."""
+    import soundfile as sf
+
     from grepchopflip import organize as org
     from grepchopflip.errors import InputError
     from grepchopflip.index_schema import validate_index_file
@@ -429,7 +429,7 @@ def index(
     if not validate:
         try:
             result = org.rebuild_index(song_dir)
-        except InputError as e:
+        except (InputError, OSError, sf.LibsndfileError) as e:
             err.print(f"error: {e}", highlight=False, markup=False)
             raise typer.Exit(EXIT_INPUT)
         for p in result["problems"]:

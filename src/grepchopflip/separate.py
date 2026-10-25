@@ -216,21 +216,22 @@ def separate(
     fast: bool = False,
     device: str = "cuda",
     force: bool = False,
+    library: str | Path | None = None,
 ) -> dict:
     """Split `path` into 4 stems and 6 drum parts under `out_dir/stems`. Cached unless `force`.
 
-    `out_dir` defaults to `<library>/<song_slug>` (config.library_dir). Raises errors.InputError (exit 3),
+    `out_dir` defaults to `<library>/<song_slug>` (config.library_dir(library)). Raises errors.InputError (exit 3),
     errors.MissingDependencyError (exit 4) or errors.SeparationError (exit 5). Library output that would
     reach stdout is redirected to stderr, so callers can keep stdout for results.
     """
     with contextlib.redirect_stdout(sys.stderr):
-        return _separate(Path(path), out_dir, fast, device, force)
+        return _separate(Path(path), out_dir, fast, device, force, library)
 
 
-def _separate(path: Path, out_dir, fast: bool, device: str, force: bool) -> dict:
+def _separate(path: Path, out_dir, fast: bool, device: str, force: bool, library=None) -> dict:
     t_start = time.perf_counter()
     source = audio_io.probe(path)
-    out_dir = (library_dir() / song_slug(path, source.sha256)) if out_dir is None else Path(out_dir)
+    out_dir = (library_dir(library) /song_slug(path, source.sha256)) if out_dir is None else Path(out_dir)
     out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     fh = _attach_file_log(out_dir)

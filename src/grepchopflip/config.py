@@ -22,9 +22,11 @@ def models_dir() -> Path:
     return cache_dir() / "models"
 
 
-def library_dir() -> Path:
-    """Default parent of the per-song folders (D-030). GCF_LIBRARY wins; else ~/Music/gcf-library.
-    A per-run `--library DIR` sets GCF_LIBRARY for that process; `-o/--out` overrides all of it."""
+def library_dir(override: str | Path | None = None) -> Path:
+    """Parent of the per-song folders (D-030): the per-run `--library DIR` (`override`), else GCF_LIBRARY,
+    else ~/Music/gcf-library. `-o/--out` overrides all of it."""
+    if override:
+        return Path(override).expanduser()
     env = os.environ.get("GCF_LIBRARY")
     if env:
         return Path(env).expanduser()

@@ -6,6 +6,10 @@ flagged `needs_review` goes to the same subtree under `review/`.
     oneshots/{kick,snare,tom,hat,cymbal,perc,bass}   loops/{drums,bass,melodic}
     phrases/{melodic,vocals}                          words/vocals                review/<the same>
 
+`oneshots/perc` is reserved: nothing maps to it in v1 (every drum part has its own folder), it only catches a
+drum part or one-shot the chop stages may add later. `oneshots/cymbal` holds both Ride and Crash (they keep
+distinct names: `Ride_NN`, `Crash_NN`).
+
 Each sample is rewritten once with a short name (D-032) and an INFO chunk; its `path` in the originating
 `chops*.json` is updated so the chop stages' caches stay valid. `.organize.json` records what was placed
 (path, sha256, naming inputs, cached loudness) so a second run changes nothing and a later `gcf chop
@@ -22,7 +26,7 @@ import time
 import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 import soundfile as sf
@@ -35,9 +39,43 @@ from grepchopflip.loudness import Levels, measure
 log = logging.getLogger("grepchopflip.organize")
 
 STATE_NAME = ".organize.json"
+TMP_SUFFIX = ".gcf-tmp"            # a new file being written beside its target
+OLD_SUFFIX = ".gcf-old"            # an original parked while names swap places
 MAX_NAME = 40                      # whole filename, including ".wav"
 REVIEW = "review"
 TOP_FOLDERS = ("oneshots", "loops", "phrases", "words", REVIEW)
+
+
+class PartialOrganize(OSError):
+    """organize failed after some files were already placed (the records still point at the originals)."""
+
+
+def _atomic_write(p: Path, text: str) -> None:
+    tmp = p.with_name(p.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, p)
+
+
+def _deletable(song: Path, rel: object) -> bool:
+    """Only relative .wav paths under the organized tree (or an old chops/ source) that stay inside the song
+    folder may ever be deleted; anything else found in a state or index file is ignored."""
+    if not isinstance(rel, str) or not rel.endswith(".wav") or "\\" in rel:
+        return False
+    p = PurePosixPath(rel)
+    if p.is_absolute() or ".." in p.parts or len(p.parts) < 2 or p.parts[0] not in (*TOP_FOLDERS, "chops"):
+        return False
+    return song.resolve() in (song / rel).resolve().parents
+
+
+def _sweep_leftovers(song: Path) -> None:
+    """Undo an interrupted run: drop half-written files, put parked originals back."""
+    for p in song.rglob("*" + TMP_SUFFIX):
+        p.unlink(missing_ok=True)
+    for p in song.rglob("*" + OLD_SUFFIX):
+        os.replace(p, p.with_name(p.name[: -len(OLD_SUFFIX)]))
 
 PART_CLASS = {"kick": "Kick", "snare": "Snare", "toms": "Tom", "hh": "Hat", "ride": "Ride", "crash": "Crash"}
 CLASS_FOLDER = {
@@ -177,6 +215,16 @@ def build_name(cls: str, num: int, width: int, c: dict, f: dict) -> str:
     return name[: MAX_NAME - 4]
 
 
+def unique_rel(folder: str, name: str, used: set[str]) -> str:
+    """`folder/name.wav`, or with `_a`, `_b`, ... appended when taken (name trimmed so the file stays <= 40)."""
+    rel, n = f"{folder}/{name}.wav", 0
+    while rel.lower() in used:
+        n += 1
+        suffix = "_" + chr(ord("a") + (n - 1) % 26) * (1 + (n - 1) // 26)
+        rel = f"{folder}/{name[: MAX_NAME - 4 - len(suffix)]}{suffix}.wav"
+    return rel
+
+
 def plan_names(recs: list[Rec], ctx: Context) -> dict[int, tuple[dict, str]]:
     """id(rec) -> (facts, target path relative to the song folder). Numbers follow source position within a
     class (loops: bar length first), shared by kept and review material."""
@@ -194,10 +242,7 @@ def plan_names(recs: list[Rec], ctx: Context) -> dict[int, tuple[dict, str]]:
         for n, (r, f) in enumerate(items, 1):
             name = build_name(cls, n, width, r.chop, f)
             folder = f"{REVIEW}/{f['folder']}" if f["review"] else f["folder"]
-            rel, suffix = f"{folder}/{name}.wav", 0
-            while rel.lower() in used:
-                suffix += 1
-                rel = f"{folder}/{name}_{chr(ord('a') + suffix)}.wav"
+            rel = unique_rel(folder, name, used)
             used.add(rel.lower())
             out[id(r)] = (f, rel)
     return out
@@ -252,11 +297,15 @@ def write_clip(src: Path, tmp: Path, bit_depth: int, title: str, artist: str, co
             "channels": int(data.shape[1]), "sample_rate": int(sr), "bit_depth": bit_depth}
 
 
+def _file_bits(p: Path) -> int:
+    return {"PCM_16": 16, "PCM_24": 24, "PCM_32": 32}.get(sf.info(str(p)).subtype, 0)
+
+
 def describe_file(p: Path, levels_cache: dict[str, dict]) -> dict:
     """Facts of an existing clip (hash, levels via the cache keyed by hash, format)."""
     sha = _sha256(p)
     info = sf.info(str(p))
-    bits = {"PCM_16": 16, "PCM_24": 24, "PCM_32": 32}.get(info.subtype, 0)
+    bits = _file_bits(p)
     lv = levels_cache.get(sha)
     if lv is None:
         data, sr = sf.read(str(p), dtype="float64", always_2d=True)
@@ -271,6 +320,7 @@ def read_state(song: Path) -> dict:
     s = _read_json(song / STATE_NAME)
     s.setdefault("files", {})
     s.setdefault("levels", {})
+    s["pending"] = [x for x in s.get("pending") or [] if isinstance(x, str)]
     return s
 
 
@@ -281,9 +331,7 @@ def _write_json_if_changed(p: Path, doc: dict, **dump) -> bool:
             return False
     except OSError:
         pass
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, p)
+    _atomic_write(p, text)
     return True
 
 
@@ -441,14 +489,22 @@ def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
         raise InputError(f"not a folder: {song}")
     if bit_depth not in (16, 24):
         raise InputError("bit depth must be 16 or 24")
+    _sweep_leftovers(song)
     docs = load_docs(song)
     recs = load_records(docs)
     ctx = load_context(song)
     state = read_state(song)
     prev_files: dict[str, dict] = state["files"]
     plan = plan_names(recs, ctx)
-    artist = ctx.song_name
+    artist = _title_of(ctx.source.get("name")) or song.name
     problems: list[str] = []
+
+    # 16-bit is one-way: organized files cannot be brought back to 24-bit
+    for r in recs:
+        p = song / r.path
+        if not r.path.startswith("chops/") and p.is_file() and bit_depth > _file_bits(p):
+            raise InputError(f"organized at {_file_bits(p)}-bit; run `gcf chop --force` then "
+                             f"`gcf organize --bit-depth {bit_depth}`")
 
     # decide per record: reuse the file where it is, or rewrite it at its target
     todo: list[tuple[Rec, Path, str, dict]] = []     # (rec, src, dst_rel, facts)
@@ -469,54 +525,62 @@ def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
         else:
             todo.append((r, src, dst_rel, f))
 
-    # write every new file next to its target first, so a name can move between records safely
+    # Order matters for crash safety: (1) write every new file beside its target, (2) move them into place,
+    # (3) point the records at them, (4) write state and index, and only then (5) delete what they replaced.
+    # Until step 5 every old file is still where its record says, so a failure never strands audio.
     written: list[tuple[Rec, str, dict, dict, Path]] = []
-    for r, src, dst_rel, f in todo:
-        dst = song / dst_rel
-        tmp = dst.with_name(dst.name + ".gcf-tmp")
-        fi = write_clip(src, tmp, bit_depth, Path(dst_rel).stem, artist, _comment(r.chop, f))
-        written.append((r, dst_rel, f, fi, tmp))
+    tmps: list[Path] = []
+    try:
+        for r, src, dst_rel, f in todo:
+            dst = song / dst_rel
+            tmp = dst.with_name(dst.name + TMP_SUFFIX)
+            tmps.append(tmp)
+            fi = write_clip(src, tmp, bit_depth, Path(dst_rel).stem, artist, _comment(r.chop, f))
+            written.append((r, dst_rel, f, fi, tmp))
+    except BaseException:
+        for t in tmps:
+            t.unlink(missing_ok=True)
+        raise
 
     final_paths = {dst for _, dst, _, _ in reused} | {dst for _, dst, _, _, _ in written}
-    removed = 0
-    # sources that moved, then organized files from earlier runs that no record points at any more
-    for r, dst_rel, _f, _fi, _tmp in written:
-        if r.path != dst_rel and r.path not in final_paths:
-            (song / r.path).unlink(missing_ok=True)
-            removed += 1
-    stale = set(prev_files) | {s.get("path") for s in _read_json(song / INDEX_NAME).get("samples", [])
-                               if isinstance(s, dict)}
-    for p in sorted(x for x in stale if isinstance(x, str) and x not in final_paths
-                    and not x.startswith("chops/") and ".." not in Path(x).parts):
-        fp = song / p
-        if fp.is_file():
-            fp.unlink()
-            removed += 1
-    for r, dst_rel, f, fi, tmp in written:
-        os.replace(tmp, song / dst_rel)
+    # a target that is another record's live file (names swapping places) is parked until the run is done
+    live = {r.path for r, *_ in written if not r.path.startswith("chops/")}
+    own = {dst: r.path for r, dst, *_ in written}
+    parked = sorted(d for d in final_paths if d in live and own.get(d) != d and (song / d).is_file())
+    replaced = 0
+    try:
+        for x in parked:
+            os.replace(song / x, song / (x + OLD_SUFFIX))
+        for r, dst_rel, f, fi, tmp in written:
+            (song / dst_rel).parent.mkdir(parents=True, exist_ok=True)
+            os.replace(tmp, song / dst_rel)
+            replaced += 1
+    except BaseException as e:
+        for t in tmps:
+            t.unlink(missing_ok=True)
+        for x in parked:
+            try:
+                os.replace(song / (x + OLD_SUFFIX), song / x)
+            except OSError:
+                pass
+        if replaced and isinstance(e, OSError):
+            raise PartialOrganize(f"{replaced} of {len(written)} files were placed before: {e}") from e
+        raise
 
-    # point the records at the new files
+    moved = [r.path for r, dst_rel, *_ in written if r.path != dst_rel and r.path not in final_paths]
+    # point the records at the new files (Rec.chop is the dict inside docs, so r.path changes here)
     changed_docs = 0
     for r, dst_rel in [*((a, b) for a, b, _, _ in reused), *((a, b) for a, b, _, _, _ in written)]:
         docs[r.doc_path]["chops"][r.idx]["path"] = dst_rel
     for p, d in docs.items():
-        before = p.read_text(encoding="utf-8")
         after = json.dumps(d, indent=2)
-        if before != after:
-            tmp = p.with_name(p.name + ".tmp")
-            tmp.write_text(after, encoding="utf-8")
-            os.replace(tmp, p)
+        if p.read_text(encoding="utf-8") != after:
+            _atomic_write(p, after)
             changed_docs += 1
 
-    # tidy: empty folders under chops/<stem>/ and in the organized tree
-    pruned = 0
-    for d in sorted((song / "chops").iterdir()) if (song / "chops").is_dir() else []:
-        if d.is_dir():
-            pruned += _prune_empty(d, keep_root=True)
-    for top in TOP_FOLDERS:
-        pruned += _prune_empty(song / top, keep_root=False)
-
-    # state and index
+    # state and index; the files to delete are listed in the state first, so a crash cannot orphan them
+    stale = [x for x in {*prev_files, *state["pending"]} if x not in final_paths]
+    pending = sorted({*moved, *stale})
     rows: list[dict] = []
     files: dict[str, dict] = {}
     levels: dict[str, dict] = {}
@@ -525,10 +589,31 @@ def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
         levels[fi["sha256"]] = fi["levels"].to_dict()
         rows.append(sample_row(r.chop, f, dst_rel, fi, str(r.chop.get("id"))))
     new_state = {"version": 1, "bit_depth": bit_depth, "files": dict(sorted(files.items())),
-                 "levels": dict(sorted(levels.items()))}
+                 "levels": dict(sorted(levels.items())), "pending": [x for x in pending if _deletable(song, x)]}
     state_changed = _write_json_if_changed(song / STATE_NAME, new_state, indent=1, sort_keys=True)
     doc = make_index(song, ctx, docs, rows, organized=not problems, bit_depth=bit_depth)
     index_changed = write_index(song, doc)
+
+    # only now delete: sources that moved, files no record points at any more, parked originals
+    removed = 0
+    for x in new_state["pending"]:
+        fp = song / x
+        if fp.is_file():
+            fp.unlink()
+            removed += 1
+    for x in parked:
+        (song / (x + OLD_SUFFIX)).unlink(missing_ok=True)
+    if new_state["pending"]:
+        new_state["pending"] = []
+        _write_json_if_changed(song / STATE_NAME, new_state, indent=1, sort_keys=True)
+
+    # tidy: empty folders under chops/<stem>/ and in the organized tree
+    pruned = 0
+    for d in sorted((song / "chops").iterdir()) if (song / "chops").is_dir() else []:
+        if d.is_dir():
+            pruned += _prune_empty(d, keep_root=True)
+    for top in TOP_FOLDERS:
+        pruned += _prune_empty(song / top, keep_root=False)
 
     counts: dict[str, int] = {}
     for r in rows:

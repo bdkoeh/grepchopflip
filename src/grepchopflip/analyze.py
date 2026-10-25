@@ -94,7 +94,7 @@ def _loudness(y: np.ndarray) -> dict:
     return {"rms_dbfs": db(rms), "peak_dbfs": db(peak)}
 
 
-def _resolve_inputs(audio_or_out: Path | str, out_dir: Path | str | None):
+def _resolve_inputs(audio_or_out: Path | str, out_dir: Path | str | None, library: Path | str | None = None):
     """Return (out_dir, mix_paths, key_stems, stems). mix_paths: files whose sum is the full mix."""
     p = Path(audio_or_out)
     if p.is_dir():
@@ -113,7 +113,7 @@ def _resolve_inputs(audio_or_out: Path | str, out_dir: Path | str | None):
     if not p.is_file():
         raise AudioReadError(f"Input not found: {p}")
     # Same folder rule as `gcf separate` (paths.song_slug), so analyze finds the stems it produced.
-    out = Path(out_dir) if out_dir else library_dir() / song_slug(p, sha256_path(p))
+    out = Path(out_dir) if out_dir else library_dir(library) / song_slug(p, sha256_path(p))
     return out, [p], _stem_paths(out, ALL_STEMS)
 
 
@@ -143,6 +143,7 @@ def analyze(
     key_override: str | None = None,
     force: bool = False,
     device: str | None = None,
+    library: Path | str | None = None,
 ) -> dict:
     """Analyze a song (or an existing output folder) and write <out>/analysis.json.
 
@@ -153,7 +154,7 @@ def analyze(
         raise ValueError("--bpm must be positive")
     key_ov = parse_key(key_override) if key_override else None
 
-    out, mix_paths, stems = _resolve_inputs(audio_or_out, out_dir)
+    out, mix_paths, stems = _resolve_inputs(audio_or_out, out_dir, library)
     key_stem_paths = {n: p for n, p in stems.items() if n in HARMONIC_STEMS}
     use_stems_for_key = set(key_stem_paths) == set(HARMONIC_STEMS)
 
