@@ -217,10 +217,14 @@ def analyze(
         print("overrides: " + ", ".join(f"{k}={v}" for k, v in result["overrides"].items()))
 
 
-from grepchopflip.chop.drums import chop_drums  # noqa: E402
+def _choppers() -> dict:
+    """Stem name -> chopper(out_dir, sensitivity=..., force=...) -> summary dict. Imports are lazy so
+    `gcf --help` stays fast. Slice 5 adds the other stems here."""
+    from grepchopflip.chop.drums import chop_drums
 
-# Stem name -> chopper(out_dir, sensitivity=..., force=...) -> summary dict. Slice 5 adds the other stems.
-CHOPPERS = {"drums": chop_drums}
+    return {"drums": chop_drums}
+
+
 ALL_CHOP_STEMS = ("drums", "bass", "other", "vocals")
 
 
@@ -256,30 +260,54 @@ def chop(
     handler = RichHandler(console=err, show_path=False, show_time=False, markup=False)
     pkg_log = logging.getLogger("grepchopflip")
     pkg_log.addHandler(handler)
+    old_level = pkg_log.level
     pkg_log.setLevel(logging.INFO)
     results: dict[str, dict] = {}
+    errors: dict[str, str] = {}
     skipped: list[str] = []
     try:
+        choppers = _choppers()
         with contextlib.redirect_stdout(sys.stderr):
             for name in wanted:
-                fn = CHOPPERS.get(name)
+                fn = choppers.get(name)
                 if fn is None:
                     err.print(f"{name}: not implemented in this build, skipped", highlight=False, markup=False)
                     skipped.append(name)
                     continue
-                results[name] = fn(out_dir, sensitivity=sensitivity, force=force)
-    except InputError as e:
-        err.print(f"error: {e}", highlight=False, markup=False)
-        raise typer.Exit(EXIT_INPUT)
+                try:
+                    results[name] = fn(out_dir, sensitivity=sensitivity, force=force)
+                except InputError as e:
+                    errors[name] = str(e)
+                except Exception as e:  # one stem failing must not hide the others
+                    errors[name] = f"{type(e).__name__}: {e}"
+                if name in errors:
+                    err.print(f"error: {name}: {errors[name]}", highlight=False, markup=False)
     finally:
         pkg_log.removeHandler(handler)
+        pkg_log.setLevel(old_level)
 
-    if not results:
-        raise typer.Exit(EXIT_NOTHING)
+    code = EXIT_OK
+    if errors:
+        code = EXIT_PARTIAL if results else EXIT_INPUT
+    elif not results:
+        code = EXIT_NOTHING
 
     if as_json:
-        print(json.dumps({"out_dir": str(out_dir), "stems": results, "skipped": skipped}, indent=2))
+        doc: dict = {"out_dir": str(out_dir), "stems": results, "skipped": skipped}
+        if errors:
+            doc["errors"] = errors
+        print(json.dumps(doc, indent=2))
+        if code:
+            raise typer.Exit(code)
         return
+    if code:
+        if results:
+            _print_chop_results(results)
+        raise typer.Exit(code)
+    _print_chop_results(results)
+
+
+def _print_chop_results(results: dict) -> None:
     for name, r in results.items():
         print(f"{name}: {'cached' if r['cached'] else 'written'}  {r['paths']['chops_dir']}")
         if "parts" in r:

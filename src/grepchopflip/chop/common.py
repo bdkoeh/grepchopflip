@@ -164,6 +164,24 @@ def bar_loops(downbeats_s: list[float], beats_per_bar: int, duration_s: float,
     return out
 
 
+def corrected_downbeats(downbeats_s: list[float], onsets_s: list[float], window_s: float = 0.040,
+                        preroll_s: float = 0.0015) -> list[float]:
+    """Move each tracked downbeat to the nearest onset within +-`window_s` (minus `preroll_s`, so a
+    fade-in ends at the attack); a downbeat with no onset in range is left where it is. Tracker
+    downbeats typically lag the real hit by 6-16 ms, which clips the first hit of a loop.
+    Pass the result to `bar_loops` as `downbeats_s`."""
+    ons = np.sort(np.asarray(list(onsets_s), dtype=float))
+    out: list[float] = []
+    for d in downbeats_s:
+        if ons.size:
+            j = int(np.argmin(np.abs(ons - d)))
+            if abs(ons[j] - d) <= window_s:
+                out.append(float(ons[j] - preroll_s))
+                continue
+        out.append(float(d))
+    return out
+
+
 # ----------------------------------------------------------------------------- records
 
 @dataclass
@@ -190,6 +208,10 @@ class Chop:
     fade_in_ms: float = 1.0
     fade_out_ms: float = 8.0
     extra: dict = field(default_factory=dict)
+    source_file: str | None = None      # stem the chop was cut from, relative to the output folder
+    source_sha256: str | None = None
+    bit_depth: int | None = None
+    bar: int | None = None              # 1-based bar of the chop start on the tracked grid (0 = before bar 1)
 
 
 def write_chops_json(path: Path, chops: list[Chop], params: dict, stage: str) -> None:
