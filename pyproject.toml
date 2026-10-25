@@ -22,6 +22,15 @@ dependencies = [
   "numpy>=2,<3",
   "torch>=2.14,<2.15",
   "torchaudio>=2.11",
+  "audio-separator>=0.47,<0.48",
+  "soundfile>=0.13",
+  # audio-separator imports onnxruntime at module load but only declares it as an extra; the CPU build
+  # is enough because Demucs and MDX23C run on torch (onnxruntime only serves legacy MDX-Net .onnx models).
+  "onnxruntime>=1.17",
+  # audio-separator needs `diffq` on Linux, which has no wheels and fails to build without a C compiler.
+  # `diffq-fixed` ships the same `diffq` module with a manylinux cp312 wheel.
+  "diffq-fixed>=0.2.4",
+  "audioread>=3.1.0",
 ]
 
 [project.scripts]
@@ -38,6 +47,11 @@ dev = [
 [build-system]
 requires = ["uv_build>=0.9,<0.14"]
 build-backend = "uv_build"
+
+[tool.uv]
+# Applies to local/dev resolution only; installs from PyPI (uv tool install) still pull `diffq`
+# transitively and need a C compiler unless the user installs diffq-fixed first.
+override-dependencies = ["diffq; sys_platform == 'never'"]
 
 [tool.uv.build-backend]
 module-name = "grepchopflip"

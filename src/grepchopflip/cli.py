@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
+from typing import Optional
 
 import typer
 from rich.console import Console
@@ -98,6 +100,60 @@ def info(
         raise typer.Exit(EXIT_MISSING_DEP)
     if codes & {"torch-cpu-only", "no-nvidia-driver", "cuda-unavailable", "driver-too-old", "no-sm120"}:
         raise typer.Exit(EXIT_GPU)
+
+
+@app.command()
+def separate(
+    audio: Path = typer.Argument(..., help="Song to split (wav, flac, aiff, mp3, m4a, ogg)."),
+    out: Optional[Path] = typer.Option(None, "-o", "--out", help="Output folder. Default: ./out/<song-slug>"),
+    fast: bool = typer.Option(False, "--fast", help="Use the faster htdemucs model (lower quality)."),
+    device: str = typer.Option("cuda", "--device", help="cuda or cpu."),
+    force: bool = typer.Option(False, "--force", help="Ignore the cache and rerun both passes."),
+    as_json: bool = typer.Option(False, "--json", help="Print a JSON summary on stdout."),
+) -> None:
+    """Split a song into vocals/drums/bass/other, then the drums into kick/snare/toms/hh/ride/crash."""
+    import contextlib
+    import logging
+
+    from rich.logging import RichHandler
+
+    from grepchopflip import audio_io
+    from grepchopflip import separate as sep_mod
+
+    if device not in ("cuda", "cpu"):
+        err.print(f"[red]![/] --device must be cuda or cpu, not {device!r}")
+        raise typer.Exit(EXIT_USAGE)
+
+    out_dir = out if out is not None else Path("out") / sep_mod.slugify(audio.name)
+
+    handler = RichHandler(console=err, show_path=False, show_time=False, markup=False)
+    pkg_log = logging.getLogger("grepchopflip")
+    pkg_log.addHandler(handler)
+    pkg_log.setLevel(logging.INFO)
+    try:
+        # Libraries sometimes print; keep stdout reserved for our result.
+        with contextlib.redirect_stdout(sys.stderr):
+            result = sep_mod.separate(audio, out_dir, fast=fast, device=device, force=force)
+    except audio_io.InputError as e:
+        err.print(f"[red]![/] {e}")
+        raise typer.Exit(EXIT_INPUT)
+    except sep_mod.SeparationError as e:
+        err.print(f"[red]![/] {e}")
+        raise typer.Exit(EXIT_GPU)
+    finally:
+        pkg_log.removeHandler(handler)
+
+    if as_json:
+        print(json.dumps(result, indent=2))
+    else:
+        s = result["seconds"]
+        print("stems cached" if result["cached"] else "stems written")
+        print(f"out: {result['out_dir']}")
+        print(f"stems: {Path(result['out_dir']) / 'stems'}")
+        if s:
+            p1, p2 = s.get("pass1", {}), s.get("pass2", {})
+            tag = " (recorded)" if result["cached"] else ""
+            print(f"pass 1: {p1.get('separate_s', '?')}s, pass 2: {p2.get('separate_s', '?')}s{tag}")
 
 
 if __name__ == "__main__":  # pragma: no cover
