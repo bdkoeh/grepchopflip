@@ -1,0 +1,47 @@
+[project]
+name = "grepchopflip"
+version = "0.1.0.dev0"
+description = "grep | chop | flip: turn one song into a library of well-cut, labeled samples with a JSON index. Built for agents to call."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Bob" }]
+keywords = ["audio", "samples", "stem-separation", "beat-making", "cli", "agent"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Sound/Audio :: Analysis",
+]
+dependencies = [
+  "typer>=0.27,<0.28",
+  "rich>=15,<16",
+  "numpy>=2,<3",
+  "torch>=2.14,<2.15",
+  "torchaudio>=2.11",
+]
+
+[project.scripts]
+gcf = "grepchopflip.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/grepchopflip/grepchopflip"
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "grepchopflip"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: needs a CUDA device"]
