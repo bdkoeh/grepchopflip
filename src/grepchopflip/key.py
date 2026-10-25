@@ -14,6 +14,15 @@ KK_MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69,
 
 KEY_SR = 22050
 
+KEY_CONFIDENCE_METHOD = (
+    "(best - second_best) / (best - worst) of Pearson correlations over the 24 Krumhansl-Kessler keys; "
+    "second_best excludes the winner's relative major/minor (reported as key_alternative)"
+)
+# Below either threshold the key is reported as null with key_reliable=false (key_candidate keeps the guess).
+# Values are provisional: clean synthetic chords score correlation ~0.9+, confidence ~0.05; noise scores lower.
+KEY_MIN_CORRELATION = 0.5
+KEY_MIN_CONFIDENCE = 0.02
+
 
 def parse_key(text: str) -> tuple[str, str]:
     """'A minor', 'Am', 'F#m', 'Bb major', 'C' -> ('A', 'minor'). Raises ValueError."""
@@ -50,7 +59,7 @@ def estimate_key_from_chroma(chroma_mean: np.ndarray) -> dict:
     c = np.asarray(chroma_mean, dtype=float)
     scores: list[tuple[float, str, str]] = []
     if not np.isfinite(c).all() or np.std(c) < 1e-9:
-        return {"key": None, "mode": None, "key_confidence": 0.0, "key_alternative": None}
+        return null_key()
     for mode, prof in (("major", KK_MAJOR), ("minor", KK_MINOR)):
         for tonic in range(12):
             r = float(np.corrcoef(c, np.roll(prof, tonic))[0, 1])
@@ -67,14 +76,24 @@ def estimate_key_from_chroma(chroma_mean: np.ndarray) -> dict:
     second = next(r for r, t, m in scores[1:] if (t, m) != (alt_t, alt_m))
     span = best - worst
     conf = float(np.clip((best - second) / span, 0.0, 1.0)) if span > 1e-9 else 0.0
+    reliable = best >= KEY_MIN_CORRELATION and conf >= KEY_MIN_CONFIDENCE
     return {
-        "key": tonic,
-        "mode": mode,
+        "key": tonic if reliable else None,
+        "mode": mode if reliable else None,
+        "key_reliable": bool(reliable),
         "key_confidence": round(conf, 4),
-        "key_alternative": {"key": alt_t, "mode": alt_m},
+        "key_confidence_method": KEY_CONFIDENCE_METHOD,
+        "key_alternative": {"key": alt_t, "mode": alt_m} if reliable else None,
+        "key_candidate": {"key": tonic, "mode": mode},
         "key_correlation": round(best, 4),
         "key_relative_margin": round(best - rel_score, 4),
     }
+
+
+def null_key() -> dict:
+    return {"key": None, "mode": None, "key_reliable": False, "key_confidence": 0.0,
+            "key_confidence_method": KEY_CONFIDENCE_METHOD, "key_alternative": None, "key_candidate": None,
+            "key_correlation": None, "key_relative_margin": None, "tuning_bins": None}
 
 
 def estimate_key(signal: np.ndarray, sr: int) -> dict:
@@ -85,7 +104,7 @@ def estimate_key(signal: np.ndarray, sr: int) -> dict:
     if sr != KEY_SR:
         y = librosa.resample(y, orig_sr=sr, target_sr=KEY_SR)
     if y.size < KEY_SR // 2 or float(np.max(np.abs(y))) < 1e-6:
-        return {"key": None, "mode": None, "key_confidence": 0.0, "key_alternative": None}
+        return null_key()
     harmonic = librosa.effects.harmonic(y)
     tuning = float(librosa.estimate_tuning(y=harmonic, sr=KEY_SR))
     chroma = librosa.feature.chroma_cqt(y=harmonic, sr=KEY_SR, tuning=tuning)

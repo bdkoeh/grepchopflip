@@ -6,9 +6,11 @@ Progress and diagnostics go to stderr only.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
 
@@ -31,6 +33,37 @@ class ModelDownloadError(RuntimeError):
     """Raised when no URL produced a file with the expected sha256."""
 
 
+class ModelLoadError(RuntimeError):
+    """A model file exists but could not be loaded onto the device."""
+
+
+_MAX_DOWNLOAD_S = 1800  # overall cap per URL, however slow the trickle
+
+
+def _verified_sidecar(path: Path) -> Path:
+    return path.with_name(path.name + ".verified")
+
+
+def _is_verified(path: Path, sha256: str) -> bool:
+    """True if the file's size+mtime match a sidecar written after a successful sha256 check."""
+    try:
+        rec = json.loads(_verified_sidecar(path).read_text(encoding="utf-8"))
+        st = path.stat()
+        return rec["sha256"] == sha256 and rec["size"] == st.st_size and rec["mtime_ns"] == st.st_mtime_ns
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+def _mark_verified(path: Path, sha256: str) -> None:
+    try:
+        st = path.stat()
+        _verified_sidecar(path).write_text(
+            json.dumps({"sha256": sha256, "size": st.st_size, "mtime_ns": st.st_mtime_ns}), encoding="utf-8"
+        )
+    except OSError:
+        pass  # sidecar is an optimization only
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -51,7 +84,10 @@ def _download(url: str, tmp_path: Path, name: str) -> str:
         total = int(resp.headers.get("Content-Length") or 0)
         done = 0
         last_pct = -10
+        deadline = time.monotonic() + _MAX_DOWNLOAD_S
         while chunk := resp.read(_CHUNK):
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"download exceeded {_MAX_DOWNLOAD_S} s")
             out.write(chunk)
             h.update(chunk)
             done += len(chunk)
@@ -78,10 +114,14 @@ def ensure_file(name: str, urls: list[str], sha256: str, dest_dir: Path | str) -
     dest = dest_dir / name
     sha256 = sha256.lower()
     if dest.is_file():
+        if _is_verified(dest, sha256):
+            return dest
         if sha256_file(dest) == sha256:
+            _mark_verified(dest, sha256)
             return dest
         _log(f"{name}: cached file failed sha256 check; re-downloading")
         dest.unlink()
+        _verified_sidecar(dest).unlink(missing_ok=True)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     failures: list[str] = []
@@ -97,6 +137,7 @@ def ensure_file(name: str, urls: list[str], sha256: str, dest_dir: Path | str) -
                 _log(f"  sha256 mismatch from {url}; trying next source")
                 continue
             os.replace(tmp_path, dest)
+            _mark_verified(dest, sha256)
             _log(f"  saved {dest}")
             return dest
         except Exception as e:  # network errors of every kind -> try the next URL

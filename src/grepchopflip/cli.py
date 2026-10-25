@@ -113,20 +113,34 @@ def analyze(
     as_json: bool = typer.Option(False, "--json", help="Print the analysis as JSON on stdout."),
 ) -> None:
     """Tempo, beats, bars and key; writes analysis.json."""
+    import contextlib
+
+    from grepchopflip.key import parse_key
+
+    # Validate options before any heavy import or work.
+    if bpm is not None and not (bpm > 0 and bpm < 1000):
+        err.print("error: --bpm must be a positive number (below 1000)", highlight=False, markup=False)
+        raise typer.Exit(EXIT_USAGE)
+    if key is not None:
+        try:
+            parse_key(key)
+        except ValueError as e:
+            err.print(f"error: --key: {e}", highlight=False, markup=False)
+            raise typer.Exit(EXIT_USAGE)
+
     from grepchopflip.analyze import analyze as run_analyze
     from grepchopflip.beats import AudioReadError
-    from grepchopflip.models import ModelDownloadError
 
     try:
-        result = run_analyze(path, out_dir=out, bpm_override=bpm, key_override=key, force=force)
+        # Libraries that print would corrupt the stdout contract; send their output to stderr.
+        with contextlib.redirect_stdout(sys.stderr):
+            result = run_analyze(path, out_dir=out, bpm_override=bpm, key_override=key, force=force)
     except AudioReadError as e:
         err.print(f"error: {e}", highlight=False, markup=False)
         raise typer.Exit(EXIT_INPUT)
-    except ValueError as e:
-        err.print(f"error: {e}", highlight=False, markup=False)
-        raise typer.Exit(EXIT_USAGE)
-    except ModelDownloadError as e:
-        err.print(f"error: {e}", highlight=False, markup=False)
+    except RuntimeError as e:
+        # ModelDownloadError, ModelLoadError, torch / CUDA errors (incl. out-of-memory)
+        err.print(f"error: {type(e).__name__}: {e}", highlight=False, markup=False)
         raise typer.Exit(EXIT_MODEL)
 
     if as_json:
@@ -143,7 +157,7 @@ def analyze(
         print(f"key: {result['key']} {result['mode']}  confidence {result['key_confidence']:.2f}"
               f"  (relative: {alt['key']} {alt['mode']})")
     else:
-        print("key: unknown")
+        print("key: unknown (not reliable)")
     if result["overrides"]:
         print("overrides: " + ", ".join(f"{k}={v}" for k, v in result["overrides"].items()))
 

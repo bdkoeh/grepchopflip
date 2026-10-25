@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 from importlib import metadata
@@ -12,8 +13,11 @@ from pathlib import Path
 import numpy as np
 
 from grepchopflip import __version__
+from grepchopflip import beats as beats_mod
+from grepchopflip import key as key_mod
 from grepchopflip.beats import AudioReadError, analyze_beats, load_mono
-from grepchopflip.key import NOTES, estimate_key, parse_key, relative_key
+from grepchopflip.key import NOTES, estimate_key, null_key, parse_key, relative_key
+from grepchopflip.models import BEAT_THIS_SHA256
 
 ANALYSIS_FILE = "analysis.json"
 DONE_FILE = "analysis_done.json"  # distinct from slice 2's stems/.done.json
@@ -116,6 +120,23 @@ def _resolve_inputs(audio_or_out: Path | str, out_dir: Path | str | None):
     return out, [p], _stem_paths(out, ALL_STEMS)
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _constants() -> dict:
+    return {
+        "bpm_range": [beats_mod.BPM_MIN, beats_mod.BPM_MAX],
+        "preferred": [beats_mod.PREFERRED_MIN, beats_mod.PREFERRED_MAX],
+        "min_beats": beats_mod.MIN_BEATS,
+        "min_confidence": beats_mod.MIN_CONFIDENCE,
+        "interval_tol": [beats_mod.INTERVAL_TOL, beats_mod.INTERVAL_TOL_MIN_S, beats_mod.DRIFT_FULL_PENALTY],
+        "key_thresholds": [key_mod.KEY_MIN_CORRELATION, key_mod.KEY_MIN_CONFIDENCE],
+    }
+
+
 def analyze(
     audio_or_out: Path | str,
     out_dir: Path | str | None = None,
@@ -126,7 +147,8 @@ def analyze(
 ) -> dict:
     """Analyze a song (or an existing output folder) and write <out>/analysis.json.
 
-    Raises AudioReadError (input unreadable) or ModelDownloadError (checkpoint unavailable).
+    Raises AudioReadError (input unreadable or too short), ModelDownloadError (checkpoint unavailable),
+    ModelLoadError / RuntimeError (torch or CUDA failure), ValueError (bad override values).
     """
     if bpm_override is not None and not bpm_override > 0:
         raise ValueError("--bpm must be positive")
@@ -142,14 +164,16 @@ def analyze(
         "key_override": list(key_ov) if key_ov else None,
         "key_source": "stems" if use_stems_for_key else "mix",
         "beat_this": beat_version,
+        "librosa": metadata.version("librosa"),
+        "checkpoint_sha256": BEAT_THIS_SHA256,
+        "gcf_version": __version__,
+        "constants": _constants(),
         "schema": SCHEMA_VERSION,
     }
-    inputs = {str(p): sha256_path(p) for p in mix_paths}
-    if use_stems_for_key:
-        inputs.update({str(p): sha256_path(p) for p in key_stem_paths.values()})
+    # every stem present is hashed: the drums stem feeds stem_loudness even though it is not used for key
+    inputs = {str(p): sha256_path(p) for p in [*mix_paths, *stems.values()]}
     input_key = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
-    out.mkdir(parents=True, exist_ok=True)
     result_path, done_path = out / ANALYSIS_FILE, out / DONE_FILE
     if not force and result_path.is_file() and done_path.is_file():
         try:
@@ -162,23 +186,19 @@ def analyze(
 
     _log(f"Loading audio: {', '.join(p.name for p in mix_paths)}")
     mix, sr = _mix(mix_paths)
+    loud = {n: _loudness(load_mono(p)[0]) for n, p in stems.items()}
+    out.mkdir(parents=True, exist_ok=True)  # only after the input has been read successfully
 
     _log("Tracking beats (beat_this)")
-    b = analyze_beats(mix, sr, device)
-
+    b = analyze_beats(mix, sr, device, bpm_override)
     overrides: dict = {}
     if bpm_override is not None:
         overrides["bpm"] = bpm_override
-        b["bpm"] = float(bpm_override)
-        b["tempo_reliable"] = True  # the user vouches for the tempo
-        if bpm_override not in b["bpm_candidates"]:
-            b["bpm_candidates"] = sorted(b["bpm_candidates"] + [float(bpm_override)])
-
     if key_ov:
         overrides["key"] = f"{key_ov[0]} {key_ov[1]}"
         alt = relative_key(*key_ov)
-        k = {"key": key_ov[0], "mode": key_ov[1], "key_confidence": 1.0,
-             "key_alternative": {"key": alt[0], "mode": alt[1]}}
+        k = {**null_key(), "key": key_ov[0], "mode": key_ov[1], "key_reliable": True, "key_confidence": 1.0,
+             "key_confidence_method": "override", "key_alternative": {"key": alt[0], "mode": alt[1]}}
     else:
         if use_stems_for_key:
             _log("Estimating key from bass + other + vocals stems")
@@ -195,14 +215,20 @@ def analyze(
         "bpm_candidates": b["bpm_candidates"],
         "bpm_raw": b["bpm_raw"],
         "tempo_reliable": b["tempo_reliable"],
+        "grid_source": b["grid_source"],
         "beats_s": b["beats_s"],
         "downbeats_s": b["downbeats_s"],
         "beats_per_bar": b["beats_per_bar"],
         "key": k["key"],
         "mode": k["mode"],
+        "key_reliable": k["key_reliable"],
         "key_confidence": k["key_confidence"],
+        "key_confidence_method": k["key_confidence_method"],
         "key_alternative": k["key_alternative"],
+        "key_candidate": k.get("key_candidate"),
+        "key_correlation": k.get("key_correlation"),
         "key_relative_margin": k.get("key_relative_margin"),
+        "tuning_bins": k.get("tuning_bins"),
         "key_source": "override" if key_ov else params["key_source"],
         "overrides": overrides,
         "models": {
@@ -214,18 +240,12 @@ def analyze(
                   "duration_s": round(len(mix) / sr, 3)},
         "gcf_version": __version__,
     }
-    if stems:
-        loud = {}
-        for n, p in stems.items():
-            y, _ = load_mono(p)
-            loud[n] = _loudness(y)
+    if loud:
         result["stem_loudness"] = loud
 
-    result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-    done_path.write_text(
-        json.dumps({"input_key": input_key, "params": params, "inputs": inputs}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    # result first, then the cache record: a crash in between leaves a stale record that cannot match
+    _atomic_write(result_path, json.dumps(result, indent=2) + "\n")
+    _atomic_write(done_path, json.dumps({"input_key": input_key, "params": params, "inputs": inputs}, indent=2) + "\n")
     _log(f"Wrote {result_path}")
     return result
 

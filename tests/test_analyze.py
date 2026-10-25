@@ -137,7 +137,9 @@ def test_cli_json_stdout_is_only_json(tmp_path):
 def test_cli_unreadable_input_exits_3(tmp_path):
     bad = tmp_path / "nope.wav"
     bad.write_bytes(b"not audio")
-    for target in (bad, tmp_path / "missing.wav"):
+    tiny = tmp_path / "tiny.wav"
+    sf.write(tiny, np.zeros(100, dtype=np.float32), 44100)
+    for target in (bad, tmp_path / "missing.wav", tiny):
         proc = subprocess.run(
             [sys.executable, "-m", "grepchopflip.cli", "analyze", str(target), "-o", str(tmp_path / "o"), "--json"],
             capture_output=True, text=True,
@@ -145,28 +147,213 @@ def test_cli_unreadable_input_exits_3(tmp_path):
         assert proc.returncode == 3, proc.stderr
         assert proc.stdout == ""
         assert "error" in proc.stderr
+    assert not (tmp_path / "o").exists()  # output folder is only created after the input was read
+
+
+@pytest.mark.parametrize("args", [["--bpm", "0"], ["--bpm", "-5"], ["--key", "H minor"], ["--key", "A dorian"]])
+def test_cli_bad_options_exit_2(tmp_path, args):
+    wav = tmp_path / "a.wav"
+    sf.write(wav, np.zeros(8000, dtype=np.float32), 44100)
+    proc = subprocess.run(
+        [sys.executable, "-m", "grepchopflip.cli", "analyze", str(wav), "-o", str(tmp_path / "o"), "--json", *args],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert proc.stdout == ""
+
+
+# ---------------------------------------------------------------- CPU tests with a stubbed tracker
+
+def _stub_tracker(monkeypatch, beats, downbeats):
+    from grepchopflip import beats as beats_mod
+
+    monkeypatch.setattr(beats_mod, "track_beats",
+                        lambda signal, sr, device=None: (np.asarray(beats, float), np.asarray(downbeats, float)))
+
+
+def _grid(bpm, n, bpb=4, t0=0.5):
+    p = 60 / bpm
+    b = t0 + np.arange(n) * p
+    return b, b[::bpb]
+
+
+def test_folded_half_grid_matches_bpm_and_keeps_downbeats():
+    from grepchopflip.beats import build_beat_result
+
+    b, d = _grid(186.0, 124)  # tracker follows the double-time pulse
+    r = build_beat_result(b, d, 45.0)
+    assert r["bpm"] == pytest.approx(93.0, abs=0.1)
+    assert r["grid_source"] == "folded_half"
+    assert r["beats_per_bar"] == 2
+    got = np.array(r["beats_s"])
+    assert all(np.min(np.abs(got - x)) < 1e-3 for x in d)  # every downbeat survives
+    assert 60 / np.median(np.diff(got)) == pytest.approx(r["bpm"], abs=0.1)
+    assert r["tempo_reliable"] is True
+    assert r["bpm_candidates"] == [93.0]
+
+
+def test_folded_double_grid_inserts_midpoints():
+    from grepchopflip.beats import build_beat_result
+
+    b, d = _grid(46.5, 40, bpb=4)
+    r = build_beat_result(b, d, 50.0)
+    assert r["bpm"] == pytest.approx(93.0, abs=0.1)
+    assert r["grid_source"] == "folded_double"
+    assert r["beats_per_bar"] == 8
+    got = np.array(r["beats_s"])
+    assert len(got) == 2 * len(b) - 1
+    assert 60 / np.median(np.diff(got)) == pytest.approx(r["bpm"], abs=0.1)
+
+
+def test_clean_150_is_kept_and_irregular_150_is_folded():
+    from grepchopflip.beats import build_beat_result
+
+    b, d = _grid(150.0, 100)
+    r = build_beat_result(b, d, 45.0)
+    assert r["bpm"] == pytest.approx(150.0, abs=0.1)
+    assert r["grid_source"] == "tracked" and len(r["beats_s"]) == len(b)
+    rng = np.random.default_rng(3)
+    bj = np.cumsum(rng.uniform(0.2, 0.6, 60))  # irregular, mean interval ~0.4 s
+    rj = build_beat_result(bj, bj[::4], 30.0)
+    assert rj["tempo_reliable"] is False
+
+
+def test_override_grid_is_consistent_and_anchored():
+    from grepchopflip.beats import build_beat_result
+
+    b, d = _grid(93.0, 40, t0=0.5)
+    r = build_beat_result(b, d, 25.0, bpm_override=90.0)
+    got = np.array(r["beats_s"])
+    assert r["grid_source"] == "override" and r["bpm"] == 90.0
+    assert 60 / np.median(np.diff(got)) == pytest.approx(90.0, abs=0.05)
+    assert np.min(np.abs(got - d[0])) < 1e-3  # anchored on the first tracked downbeat
+    assert got[0] >= 0 and got[-1] <= 25.0
+    assert r["beats_per_bar"] == 4
+
+
+def test_override_without_tracked_beats_still_has_a_grid():
+    from grepchopflip.beats import build_beat_result
+
+    r = build_beat_result(np.array([]), np.array([]), 20.0, bpm_override=120.0)
+    assert len(r["beats_s"]) >= 8 and r["tempo_reliable"] is True
+    short = build_beat_result(np.array([]), np.array([]), 2.0, bpm_override=120.0)
+    assert short["tempo_reliable"] is False  # never reliable with a (near-)empty grid
+
+
+def test_no_beats_is_unreliable_never_empty_but_reliable():
+    from grepchopflip.beats import build_beat_result
+
+    r = build_beat_result(np.array([]), np.array([]), 10.0)
+    assert r["bpm"] is None and r["tempo_reliable"] is False and r["beats_s"] == []
+
+
+def test_silence_input_runs_end_to_end(tmp_path, monkeypatch):
+    from grepchopflip.analyze import analyze
+
+    _stub_tracker(monkeypatch, [], [])
+    wav = tmp_path / "silence.wav"
+    sf.write(wav, np.zeros(SR * 5, dtype=np.float32), SR)
+    r = analyze(wav, out_dir=tmp_path / "o")
+    assert r["bpm"] is None and r["tempo_reliable"] is False
+    assert r["key"] is None and r["key_reliable"] is False
+    assert (tmp_path / "o" / "analysis.json").is_file()
+
+
+def test_noise_key_is_reported_unreliable():
+    rng = np.random.default_rng(5)
+    r = estimate_key(rng.standard_normal(SR * 6).astype(np.float32) * 0.1, SR)
+    assert r["key_reliable"] is False and r["key"] is None and r["key_alternative"] is None
+    assert r["key_candidate"] is not None and r["key_correlation"] is not None
+
+
+def test_chord_key_output_fields():
+    y, sr = chord_track()
+    r = estimate_key(y, sr)
+    assert r["key_reliable"] is True
+    assert r["key_correlation"] > 0.5 and "tuning_bins" in r
+    assert "second_best" in r["key_confidence_method"]
+
+
+def _slice2_folder(tmp_path):
+    """Folder as slice 2 leaves it: source.json with `path`, stems/*.wav."""
+    song, sr = drum_track(100.0, 12.0)
+    chords, _ = chord_track(12.0)
+    n = min(len(song), len(chords))
+    d = tmp_path / "song_out"
+    (d / "stems").mkdir(parents=True)
+    orig = tmp_path / "orig.wav"
+    sf.write(orig, (song[:n] + 0.3 * chords[:n]), sr)
+    sf.write(d / "stems" / "drums.wav", song[:n], sr)
+    sf.write(d / "stems" / "bass.wav", 0.3 * chords[:n], sr)
+    sf.write(d / "stems" / "other.wav", 0.3 * chords[:n], sr)
+    sf.write(d / "stems" / "vocals.wav", np.zeros(n, dtype=np.float32) + 1e-4, sr)
+    (d / "source.json").write_text(json.dumps({"path": str(orig), "sha256": "x"}))
+    return d, n, sr
+
+
+def test_slice2_style_folder_uses_stems_for_key_and_caches(tmp_path, monkeypatch):
+    from grepchopflip.analyze import analyze
+
+    b, d_ = _grid(100.0, 20)
+    _stub_tracker(monkeypatch, b, d_)
+    folder, n, sr = _slice2_folder(tmp_path)
+    r = analyze(folder)
+    assert r["key_source"] == "stems"
+    assert (r["key"], r["mode"]) == ("A", "minor")
+    assert set(r["stem_loudness"]) == {"vocals", "drums", "bass", "other"}
+    assert r["input"]["files"] == [str(tmp_path / "orig.wav")]
+    assert (folder / "analysis.json").is_file() and (folder / "analysis_done.json").is_file()
+    assert not list(folder.glob("*.tmp"))
+    # cached on rerun; changing the drums stem (loudness only) invalidates it
+    r2 = analyze(folder)
+    assert r2 == json.loads((folder / "analysis.json").read_text())
+    done1 = json.loads((folder / "analysis_done.json").read_text())
+    sf.write(folder / "stems" / "drums.wav", np.zeros(n, dtype=np.float32), sr)
+    analyze(folder)
+    done2 = json.loads((folder / "analysis_done.json").read_text())
+    assert done1["input_key"] != done2["input_key"]
+    assert {"gcf_version", "librosa", "checkpoint_sha256", "constants"} <= set(done2["params"])
+
+
+def test_slice2_folder_without_source_falls_back_to_stem_mix(tmp_path, monkeypatch):
+    from grepchopflip.analyze import analyze
+
+    b, d_ = _grid(100.0, 20)
+    _stub_tracker(monkeypatch, b, d_)
+    folder, n, sr = _slice2_folder(tmp_path)
+    (folder / "source.json").unlink()
+    r = analyze(folder)
+    assert len(r["input"]["files"]) == 4
 
 
 # ---------------------------------------------------------------- octave rule (D-022) and reliability (D-024)
 
 @pytest.mark.parametrize(
-    "raw, expected, cands",
+    "raw, conf, expected, cands",
     [
-        (93.0, 93.0, [93.0]),                      # only 93 in range (46.5 and 186 are out)
-        (186.0, 93.0, [93.0]),                     # double-time reading folds down
-        (46.5, 93.0, [93.0]),                      # half-time reading folds up
-        (140.0, 70.0, [70.0, 140.0]),              # both in range, 70 is in the preferred band
-        (70.0, 70.0, [70.0, 140.0]),
-        (180.0, 90.0, [90.0]),
-        (120.0, 120.0, [60.0, 120.0]),             # neither in 70-100: keep the folded reading
-        (240.0, 120.0, [60.0, 120.0]),
-        (80.0, 80.0, [80.0, 160.0]),               # 160 is still in range; 80 is preferred
-        (30.0, 60.0, [60.0, 120.0]),
-        (170.0, 85.0, [85.0]),
+        # D-022 r2: in range with good regularity -> kept as is
+        (93.0, 0.9, 93.0, [93.0]),
+        (150.0, 0.9, 150.0, [75.0, 150.0]),        # a clean 150 stays 150
+        (140.0, 0.9, 140.0, [70.0, 140.0]),
+        (70.0, 0.9, 70.0, [70.0, 140.0]),
+        (120.0, 0.9, 120.0, [60.0, 120.0]),
+        # outside 60-160 -> fold, preferring 70-100
+        (186.0, 0.9, 93.0, [93.0]),                # double-time reading folds down
+        (46.5, 0.9, 93.0, [93.0]),                 # half-time reading folds up
+        (180.0, 0.9, 90.0, [90.0]),
+        (240.0, 0.9, 120.0, [60.0, 120.0]),        # neither candidate in 70-100: keep the folded reading
+        (30.0, 0.9, 60.0, [60.0, 120.0]),
+        (300.0, 0.9, 75.0, [75.0, 150.0]),         # ambiguous after folding: 70-100 wins
+        # low confidence in range -> ambiguous, prefer 70-100
+        (140.0, 0.3, 70.0, [70.0, 140.0]),
+        (150.0, 0.3, 75.0, [75.0, 150.0]),
+        (93.0, 0.3, 93.0, [93.0]),
+        (120.0, 0.3, 120.0, [60.0, 120.0]),
+        (80.0, 0.3, 80.0, [80.0, 160.0]),
     ],
 )
-def test_resolve_tempo(raw, expected, cands):
-    chosen, got = resolve_tempo(raw)
+def test_resolve_tempo(raw, conf, expected, cands):
+    chosen, got = resolve_tempo(raw, conf)
     assert chosen == pytest.approx(expected)
     assert got == pytest.approx(cands)
 
@@ -189,10 +376,27 @@ def test_beat_stats_regular_and_irregular():
     assert st["confidence"] > 0.99
     assert st["beats_per_bar"] == 4
     rng = np.random.default_rng(1)
-    jittered = np.cumsum(rng.uniform(0.2, 1.2, 30))
-    assert beat_stats(jittered, jittered[::3])["confidence"] < 0.6
+    jittered = np.cumsum(rng.uniform(0.2, 1.2, 30))  # wildly irregular: far below the 0.6 threshold
+    assert beat_stats(jittered, jittered[::3])["confidence"] < 0.35
     assert beat_stats(np.array([]), np.array([]))["bpm_raw"] is None
     assert beat_stats(beats, beats[::3])["beats_per_bar"] == 3
+
+
+def test_regularity_survives_breakdown_but_not_drift():
+    from grepchopflip.beats import beat_regularity
+
+    p = 60 / 93.0
+    steady = np.arange(0, 60) * p
+    assert beat_regularity(steady) > 0.99
+    # 25-beat gap (breakdown) in an otherwise steady track
+    gapped = np.concatenate([steady[:30], steady[30:] + 25 * p])
+    assert beat_regularity(gapped) > 0.95
+    assert is_tempo_reliable(beat_regularity(gapped), len(gapped))
+    # tempo ramp 90 -> 96 BPM over the track
+    bpm = np.linspace(90, 96, 60)
+    drift = np.concatenate([[0], np.cumsum(60 / bpm[:-1])])
+    assert beat_regularity(drift) < 0.5
+    assert beat_regularity(steady) > beat_regularity(drift)
 
 
 def test_bpm_from_frame_quantized_beats():
@@ -270,16 +474,29 @@ def test_ensure_file_downloads_and_verifies(server, tmp_path):
 def test_ensure_file_sha_mismatch_falls_to_next_and_leaves_no_partial(server, tmp_path):
     p = ensure_file("m.bin", [server.url("/bad.bin"), server.url("/good.bin")], server.sha, tmp_path)
     assert p.read_bytes() == server.payload
-    assert [x.name for x in tmp_path.iterdir()] == ["m.bin"]
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["m.bin", "m.bin.verified"]  # no .part leftovers
 
 
 def test_ensure_file_mirror_used_when_primary_fails(server, tmp_path, capsys):
     dead_primary = "http://127.0.0.1:1/final0.ckpt"  # connection refused
     p = ensure_file("m.bin", [dead_primary, server.url("/good.bin")], server.sha, tmp_path)
     assert p.is_file()
-    err = capsys.readouterr().err
-    assert dead_primary in err and server.url("/good.bin") in err
-    assert capsys.readouterr().out == ""
+    cap = capsys.readouterr()
+    assert dead_primary in cap.err and server.url("/good.bin") in cap.err
+    assert cap.out == ""
+
+
+def test_ensure_file_skips_rehash_when_sidecar_matches(server, tmp_path, monkeypatch):
+    from grepchopflip import models
+
+    ensure_file("m.bin", [server.url("/good.bin")], server.sha, tmp_path)
+    monkeypatch.setattr(models, "sha256_file", lambda p: pytest.fail("re-hashed a verified file"))
+    assert ensure_file("m.bin", [], server.sha, tmp_path).is_file()
+    # touching the file invalidates the sidecar, so it is hashed again
+    monkeypatch.undo()
+    (tmp_path / "m.bin").write_bytes(b"tampered")
+    p = ensure_file("m.bin", [server.url("/good.bin")], server.sha, tmp_path)
+    assert p.read_bytes() == server.payload
 
 
 def test_ensure_file_all_fail_names_every_url(server, tmp_path):
