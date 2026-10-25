@@ -131,7 +131,12 @@ def test_loops_start_on_the_hit_when_tracker_lags(out_dir):
         mid = slice(int(0.01 * sr), len(y) - int(0.01 * sr))
         assert np.array_equal(y[mid], full[s:e][mid])                # only the ends are faded
         assert np.abs(y[0]).max() == 0 and np.abs(y[-1]).max() == 0
-        assert c["length_beats"] == 4 * c["bars"] and c["fade_in_ms"] == 1.5 and not c["needs_review"]
+        assert c["length_beats"] == 4 * c["bars"] and c["fade_in_ms"] == 1.5
+        # the last downbeat (8.5 s) has no hit, so loops ending there are flagged; all others are clean
+        ends_on_tracked = c["extra"]["boundary_sources"][1] == "tracked"
+        assert c["needs_review"] == ends_on_tracked, (c["id"], c["extra"]["review_reasons"])
+        if ends_on_tracked:
+            assert c["extra"]["review_reasons"] == ["boundary_not_on_hit"]
         assert c["extra"]["loop_bpm"] == pytest.approx(120.0, rel=0.01)
         assert c["source_file"] == "stems/drums.wav"
     for n in (1, 2, 4):

@@ -371,8 +371,12 @@ def _loop_chops(drums: np.ndarray, sr: int, analysis: dict, grid: dict, dropped:
             continue
         dur = (e - s) / sr
         reasons = list(gate)
-        if bpm:
-            exp = nbars * bpb * 60.0 / float(bpm)
+        # reference bar length: the median corrected bar as played beats the BPM estimate (which can
+        # sit 1-2 % off and would flag every loop of a steady band)
+        ref_bar = float(np.median(np.diff(corrected))) if len(corrected) >= 3 else (
+            bpb * 60.0 / float(bpm) if bpm else None)
+        if ref_bar:
+            exp = nbars * ref_bar
             dev = abs(dur - exp) / exp
             if dev > LOOP_LENGTH_TOL:
                 dropped["off_length"] = dropped.get("off_length", 0) + 1
