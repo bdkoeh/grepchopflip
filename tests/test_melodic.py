@@ -32,7 +32,7 @@ def job(tmp_path_factory):
 
 def test_phrase_boundaries_follow_harmony(job):
     chop_melodic(job, force=True)
-    doc = json.loads((job / "chops/other/chops.json").read_text())
+    doc = json.loads((job / "chops/melodic/chops.json").read_text())
     phrases = [c for c in doc["chops"] if c["kind"] == "phrase"]
     starts = [c["source_start_s"] for c in phrases]
     for change in (4.0, 8.0, 12.0):
@@ -50,24 +50,25 @@ def test_loops_exact_and_silent_bar_dropped(job):
     res = chop_melodic(job, force=True)
     assert res["counts"]["loop_1bar"] == 7          # 8 windows, the silent last bar is dropped
     assert res["counts"]["loop_4bar"] == 5          # windows starting at bars 0..4; the last is 3/4 audible
-    doc = json.loads((job / "chops/other/chops.json").read_text())
+    doc = json.loads((job / "chops/melodic/chops.json").read_text())
     for c in (c for c in doc["chops"] if c["kind"] == "loop"):
         y, sr = sf.read(str(job / c["path"]))
-        assert len(y) == c["bars"] * BPB * round(BEAT * SR)
-        assert c["source_start_s"] % BAR == pytest.approx(0, abs=1e-6)
+        assert abs(len(y) - c["bars"] * BPB * round(BEAT * SR)) <= 200   # zero-snapped boundaries
+        assert min(c["source_start_s"] % BAR, BAR - c["source_start_s"] % BAR) < 0.003
+        assert abs(y[0]).max() < 1e-3 and abs(y[-1]).max() < 1e-3
 
 
 def test_reproducible(job):
     chop_melodic(job, force=True)
-    a = (job / "chops/other/chops.json").read_bytes()
+    a = (job / "chops/melodic/chops.json").read_bytes()
     assert chop_melodic(job)["cached"]
     chop_melodic(job, force=True)
-    assert (job / "chops/other/chops.json").read_bytes() == a
+    assert (job / "chops/melodic/chops.json").read_bytes() == a
 
 
 def test_stale_outputs_removed_on_rebuild(job):
     chop_melodic(job, force=True)
-    stray = job / "chops/other/phrases/phrase_9999.wav"
+    stray = job / "chops/melodic/phrases/phrase_9999.wav"
     stray.write_bytes(b"x")
     chop_melodic(job, force=True)
     assert not stray.exists()

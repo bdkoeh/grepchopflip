@@ -20,7 +20,7 @@ from grepchopflip.key import estimate_key_from_chroma
 
 log = logging.getLogger("grepchopflip.chop")
 
-ALGO = "melodic-1"
+ALGO = "melodic-2"
 CHROMA_SR = 22050
 CHROMA_HOP = 512
 ONSET_DELTA = 0.05
@@ -92,8 +92,8 @@ def harmony_changes(beat_chroma: np.ndarray, active: np.ndarray, thresh: float =
     return out
 
 
-def chop_melodic(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> dict:
-    job = runner.load_job(out_dir, "other", ["loops", "phrases"])
+def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False) -> dict:
+    job = runner.load_job(out_dir, "other", ["loops", "phrases"], folder="melodic")
     params = {"algo": ALGO, "sensitivity": sensitivity, "onset_delta": ONSET_DELTA,
               "min_interval_ms": MIN_INTERVAL_MS, "chroma_split": CHROMA_SPLIT,
               "chroma_window_beats": CHROMA_WINDOW, "max_bars": MAX_BARS, "loops_bars": [1, 2, 4],
@@ -206,7 +206,7 @@ def chop_melodic(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -
         seg = peak_normalize(apply_fades(seg_raw, sr), -1.0)
         n_made += 1
         name = f"phrase_{n_made:04d}"
-        rel = f"chops/other/phrases/{name}.wav"
+        rel = f"chops/melodic/phrases/{name}.wav"
         write_chop(job.out_dir / rel, seg, sr)
         cand = kd["key_candidate"]
         chops.append(Chop(

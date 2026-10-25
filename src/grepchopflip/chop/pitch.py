@@ -52,7 +52,7 @@ def _penn_midi(mono: np.ndarray, fmin: float, fmax: float) -> float | None:
         import penn
         import torch
         import librosa
-    except ImportError:
+    except Exception:  # not installed, or (torch 2.14 / cu130) torbi has no matching compiled library
         return None
     audio = torch.from_numpy(mono)[None]
     pitch, periodicity = penn.from_audio(audio, PITCH_SR, hopsize=0.01, fmin=max(fmin, 31.0), fmax=fmax,

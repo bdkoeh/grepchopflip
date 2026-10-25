@@ -233,6 +233,9 @@ def chop(
     sensitivity: float = typer.Option(0.5, "--sensitivity", help="Onset sensitivity 0..1 (higher = more slices)."),
     force: bool = typer.Option(False, "--force", help="Ignore earlier results and rebuild."),
     as_json: bool = typer.Option(False, "--json", help="Print a JSON summary on stdout."),
+    extras: Optional[str] = typer.Option(
+        None, "--extras", help="Optional extras to run after the core: words (vocal word chops), "
+                               "notes (MuScriptor note phrases, CC BY-NC weights)."),
 ) -> None:
     """Cut stems into one-shots, loops and phrases (WAV files plus chops.json)."""
     import contextlib
@@ -246,6 +249,10 @@ def chop(
     bad = [s for s in names if s not in CHOPPERS]
     if bad or not names:
         err.print(f"[red]![/] unknown stem(s) {bad or stems!r}; choose from {', '.join(CHOPPERS)}")
+        raise typer.Exit(EXIT_USAGE)
+    extra_names = [s.strip() for s in extras.split(",") if s.strip()] if extras else []
+    if [e for e in extra_names if e not in ("words", "notes")]:
+        err.print("[red]![/] --extras takes words and/or notes")
         raise typer.Exit(EXIT_USAGE)
     if not 0.0 <= sensitivity <= 1.0:
         err.print("[red]![/] --sensitivity must be between 0 and 1")
@@ -263,6 +270,12 @@ def chop(
         with contextlib.redirect_stdout(sys.stderr):
             for name in names:
                 results[name] = CHOPPERS[name](out_dir, sensitivity=sensitivity, force=force)
+            for name in extra_names:
+                if name == "words":
+                    from grepchopflip.chop.words_whisper import chop_words as fn
+                else:
+                    from grepchopflip.chop.notes_muscriptor import chop_notes as fn
+                results[f"extra:{name}"] = fn(out_dir, sensitivity=sensitivity, force=force)
     except InputError as e:
         err.print(f"[red]![/] {e}")
         raise typer.Exit(EXIT_INPUT)
@@ -274,6 +287,9 @@ def chop(
         print(json.dumps(summary, indent=2))
     else:
         for name, r in results.items():
+            if r.get("skipped"):
+                print(f"{name}: skipped ({r['reason']})")
+                continue
             counts = ", ".join(f"{k} {v}" for k, v in r["counts"].items()) or "nothing"
             print(f"{name}: {counts}{' (cached)' if r['cached'] else ''}  -> {r['chops_json']}")
 

@@ -37,6 +37,7 @@ class Job:
     tempo_reliable: bool
     key: str | None
     mode: str | None
+    folder: str = ""            # folder under chops/ (the stem name, except `other` -> `melodic`)
     sr: int = 0
     outputs: list[str] = field(default_factory=list)  # subfolders (relative to chops_dir) this stage owns
 
@@ -50,7 +51,7 @@ class Job:
         return 0.5
 
 
-def load_job(out_dir: Path, stem: str, outputs: list[str]) -> Job:
+def load_job(out_dir: Path, stem: str, outputs: list[str], folder: str | None = None) -> Job:
     out_dir = Path(out_dir)
     stem_path = out_dir / "stems" / f"{stem}.wav"
     ana_path = out_dir / "analysis.json"
@@ -63,7 +64,7 @@ def load_job(out_dir: Path, stem: str, outputs: list[str]) -> Job:
     except (OSError, ValueError) as e:
         raise InputError(f"unreadable {ana_path}: {e}")
     return Job(
-        out_dir=out_dir, stem=stem, stem_path=stem_path, analysis=ana, chops_dir=out_dir / "chops" / stem,
+        out_dir=out_dir, stem=stem, stem_path=stem_path, analysis=ana, chops_dir=out_dir / "chops" / (folder or stem), folder=folder or stem,
         beats_s=[float(b) for b in ana.get("beats_s") or []],
         downbeats_s=[float(b) for b in ana.get("downbeats_s") or []],
         beats_per_bar=int(ana.get("beats_per_bar") or 4),
@@ -116,6 +117,7 @@ def summarize(job: Job, chops: list, params: dict, cached: bool, json_name: str 
         "total": len(chops),
         "counts": dict(sorted(counts.items())),
         "chops_json": str((job.chops_dir / json_name).relative_to(job.out_dir)),
+        "paths": {"chops_dir": str(job.chops_dir.relative_to(job.out_dir))},
         "notes": params.get("notes", []),
     }
 
@@ -134,7 +136,7 @@ def make_loops(job: Job, y: np.ndarray, sr: int, bars: tuple[int, ...], prefix: 
     """Exact bar-grid loops of `y` (no fades, sample-exact window = round(start*sr)..round(end*sr)).
     Windows whose RMS is `silence_rel_db` below the whole stem's RMS (or below -65 dBFS) are dropped.
     Returns (chops, n_dropped_silent)."""
-    from grepchopflip.chop.common import peak_dbfs, peak_normalize, rms_dbfs, write_chop
+    from grepchopflip.chop.common import apply_fades, peak_dbfs, peak_normalize, rms_dbfs, write_chop, zero_snap
 
     dur = len(y) / sr
     stem_rms = rms_dbfs(y)
@@ -142,8 +144,18 @@ def make_loops(job: Job, y: np.ndarray, sr: int, bars: tuple[int, ...], prefix: 
     chops: list[Chop] = []
     dropped = 0
     counter: dict[int, int] = {}
+    ana = job.analysis
+    shaky = ana.get("grid_source", "tracked") != "tracked" or float(ana.get("grid_consistency", 1.0) or 0.0) < 0.8
     for s, e, n in bar_loops_for(job, dur, bars):
-        a, b = int(round(s * sr)), int(round(e * sr))
+        if job.bpm:
+            expect = n * job.beats_per_bar * 60.0 / job.bpm
+            if abs((e - s) - expect) > 0.08 * expect:
+                dropped += 1
+                continue
+        # D-028 r2: raw tracker downbeats lag real hits by 6-16 ms; boundaries snap to zero crossings and
+        # get a 1.5 ms fade at each end until the lead switches loops to the corrected grid (chops/grid.json).
+        a, b = zero_snap(y, int(round(s * sr))), zero_snap(y, int(round(e * sr)))
+        b = min(b, len(y))
         seg = y[a:b]
         r = rms_dbfs(seg)
         if r is None or r < floor:
@@ -151,15 +163,16 @@ def make_loops(job: Job, y: np.ndarray, sr: int, bars: tuple[int, ...], prefix: 
             continue
         counter[n] = counter.get(n, 0) + 1
         name = f"{prefix}_{n}bar_{counter[n]:03d}"
-        rel = f"chops/{job.stem}/{folder}/{name}.wav"
-        seg = peak_normalize(seg, -1.0)
+        rel = f"chops/{job.folder}/{folder}/{name}.wav"
+        seg = peak_normalize(apply_fades(seg, sr, 1.5, 1.5), -1.0)
         write_chop(job.out_dir / rel, seg, sr)
         chops.append(Chop(
             id=name, stem=job.stem, part=None, kind="loop", source_start_s=round(a / sr, 6),
             source_end_s=round(b / sr, 6), path=rel, channels=seg.shape[1], sample_rate=sr, bars=n,
             start_beat=nearest_beat_position(job, s), length_beats=float(n * job.beats_per_bar),
-            peak_dbfs=peak_dbfs(seg), rms_dbfs=rms_dbfs(seg), zero_snapped=False,
-            fade_in_ms=0.0, fade_out_ms=0.0,
+            peak_dbfs=peak_dbfs(seg), rms_dbfs=rms_dbfs(seg), zero_snapped=True,
+            fade_in_ms=1.5, fade_out_ms=1.5, needs_review=shaky,
+            extra={"raw_downbeat_start_s": round(s, 6), "grid": "analysis-raw"},
         ))
     return chops, dropped
 

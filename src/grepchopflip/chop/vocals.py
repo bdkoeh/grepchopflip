@@ -43,7 +43,7 @@ def energy_threshold_db(mono: np.ndarray, sr: int, below_loud_db: float) -> floa
     return float(np.percentile(active, 90) - below_loud_db)
 
 
-def chop_vocals(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> dict:
+def chop_vocals(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False) -> dict:
     job = runner.load_job(out_dir, "vocals", ["phrases"])
     below = THRESHOLD_BELOW_LOUD_DB + (0.5 - float(np.clip(sensitivity, 0, 1))) * 10.0
     params = {"algo": ALGO, "sensitivity": sensitivity, "min_dur_s": MIN_DUR, "max_dur_s": MAX_DUR,

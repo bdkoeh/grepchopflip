@@ -35,6 +35,16 @@ dependencies = [
   "auditok>=0.5.2",
 ]
 
+[project.optional-dependencies]
+# Optional extras (D-002: the core stays MIT and light; anything non-MIT or heavy is opt-in and labeled).
+words = [
+  "faster-whisper>=1.1",
+  "nvidia-cublas-cu12",
+  "nvidia-cudnn-cu12",
+]
+notes = ["muscriptor"]         # weights are CC BY-NC 4.0 (non-commercial); gcf prints a notice on first use
+pitch-gpu = ["penn"]           # optional GPU pitch cross-check for bass roots (KNOWN BROKEN on torch 2.14/cu130: torbi has no matching binary)
+
 [project.scripts]
 gcf = "grepchopflip.cli:app"
 

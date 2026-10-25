@@ -16,7 +16,7 @@ from grepchopflip.chop.pitch import midi_to_name, pitch_stats
 
 log = logging.getLogger("grepchopflip.chop")
 
-ALGO = "bass-1"
+ALGO = "bass-2"
 MIN_CONFIDENCE = 0.5
 MIN_LEN_S = 0.08
 MAX_LEN_S = 3.0
@@ -26,7 +26,7 @@ GATE_REL_DB = 40.0          # slices whose peak is this far below the stem peak 
 FMIN, FMAX = 30.0, 400.0
 
 
-def chop_bass(out_dir: Path, sensitivity: float = 0.5, force: bool = False, use_penn: bool = False) -> dict:
+def chop_bass(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, use_penn: bool = False) -> dict:
     job = runner.load_job(out_dir, "bass", ["oneshots", "loops"])
     params = {"algo": ALGO, "sensitivity": sensitivity, "onset_delta": ONSET_DELTA,
               "min_interval_ms": MIN_INTERVAL_MS, "min_pitch_confidence": MIN_CONFIDENCE,

@@ -60,7 +60,8 @@ def test_oneshots_roots_and_loops(job):
     for c in loops:
         y, sr = sf.read(str(root / c["path"]))
         assert len(y) == round(c["source_end_s"] * sr) - round(c["source_start_s"] * sr)
-        assert len(y) == c["bars"] * 4 * round(BEAT * SR)
+        assert abs(len(y) - c["bars"] * 4 * round(BEAT * SR)) <= 200   # zero-snapped boundaries (+-96 samples)
+        assert abs(y[0]).max() < 1e-3 and abs(y[-1]).max() < 1e-3      # faded ends
 
 
 def test_tempo_unreliable_skips_loops(tmp_path):
