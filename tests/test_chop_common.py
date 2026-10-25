@@ -18,9 +18,9 @@ def test_fades_zero_edges():
 def test_zero_snap_lands_on_crossing():
     sr = 44100
     t = np.arange(sr) / sr
-    y = np.sin(2 * np.pi * 100 * t).astype(np.float32)[:, None]
-    idx = c.zero_snap(y, 1000)
-    assert abs(float(y[idx, 0])) < 0.02
+    y = np.sin(2 * np.pi * 441 * t).astype(np.float32)[:, None]  # crossing every 50 samples
+    idx = c.zero_snap(y, 1000, search=96)
+    assert abs(float(y[idx, 0])) < 0.07  # within one sample of a crossing at 441 Hz
 
 
 def test_fold_mono():
