@@ -207,11 +207,11 @@ class Chop:
     zero_snapped: bool = True
     fade_in_ms: float = 1.0
     fade_out_ms: float = 8.0
-    extra: dict = field(default_factory=dict)
-    source_file: str | None = None      # stem the chop was cut from, relative to the output folder
-    source_sha256: str | None = None
+    source_file: str | None = None      # stem the chop was cut from, e.g. stems/bass.wav (song-folder relative)
+    source_sha256: str | None = None    # sha256 of that stem file
     bit_depth: int | None = None
-    bar: int | None = None              # 1-based bar of the chop start on the tracked grid (0 = before bar 1)
+    bar: int | None = None              # 1-based bar of the chop start on the downbeat grid (0 = before bar 1)
+    extra: dict = field(default_factory=dict)
 
 
 def write_chops_json(path: Path, chops: list[Chop], params: dict, stage: str) -> None:

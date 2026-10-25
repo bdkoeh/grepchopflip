@@ -62,7 +62,7 @@ log = logging.getLogger(__name__)
 
 CHOP_FORMAT_VERSION = "drums-2"
 PARTS = ("kick", "snare", "toms", "hh", "ride", "crash")
-GRID_PARTS = ("kick", "snare", "toms", "crash")     # hits used to correct the downbeats
+GRID_PARTS = ("kick", "snare")     # hits used to correct the downbeats (toms/crash snapped to fills; lead 2026-10-25)
 LOOP_BARS = (1, 2, 4)
 
 # delta: peak-picking threshold on the (level-normalized) onset strength; min_interval_ms: minimum gap
@@ -87,6 +87,8 @@ NORMALIZE_DBFS = -1.0
 END_FLOOR_DB, END_HOLD_MS, END_MAX_S = -40.0, 100.0, 2.0
 SILENT_PART_DBFS = -60.0    # a part stem whose peak is below this has no hits
 FLOOR_ABS_DBFS, FLOOR_REL_DB = -55.0, -40.0
+# Cymbal parts carry mostly bleed below this relative floor; kick/snare/toms keep ghost notes (lead 2026-10-25).
+FLOOR_REL_DB_BY_PART = {"hh": -30.0, "ride": -30.0, "crash": -30.0}
 PEAK_AT_END_MS = 10.0
 REFINE = {"frac": 0.15, "back_ms": 3.0, "win_before_ms": 30.0, "win_after_ms": 20.0, "walk_ms": 0.3}
 HOP = 256
@@ -94,7 +96,7 @@ HOP = 256
 LOOP_SILENT_DBFS = -50.0
 LOOP_FADE_MS = 1.5
 LOOP_LENGTH_TOL = 0.08
-GRID_WINDOW_S = 0.040
+GRID_WINDOW_S = 0.025       # tracker lag never exceeds its 20 ms grid; wider windows snapped to neighbours
 GRID_CONSISTENCY_MIN = 0.8
 RANKING = "std_of_per_beat_rms_db"
 
@@ -119,7 +121,7 @@ def _settings(sensitivity: float) -> dict:
         "refine": REFINE,
         "min_slice_ms": MIN_SLICE_MS,
         "silent_part_dbfs": SILENT_PART_DBFS,
-        "floor": [FLOOR_ABS_DBFS, FLOOR_REL_DB],
+        "floor": [FLOOR_ABS_DBFS, FLOOR_REL_DB, FLOOR_REL_DB_BY_PART],
         "peak_at_end_ms": PEAK_AT_END_MS,
         "preroll_ms": PREROLL_MS,
         "fades_ms": [FADE_IN_MS, FADE_OUT_MS],
@@ -247,7 +249,8 @@ def _chop_part(part: str, y: np.ndarray, sr: int, sensitivity: float,
         return []
 
     loudest = max(c["raw_peak"] for c in cands)
-    floor = max(10 ** (FLOOR_ABS_DBFS / 20), loudest * 10 ** (FLOOR_REL_DB / 20))
+    rel_db = FLOOR_REL_DB_BY_PART.get(part, FLOOR_REL_DB)
+    floor = max(10 ** (FLOOR_ABS_DBFS / 20), loudest * 10 ** (rel_db / 20))
     out = []
     for c in cands:
         if c["raw_peak"] < floor:

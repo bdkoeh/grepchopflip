@@ -266,11 +266,19 @@ def test_cli_json_stdout_contract(out_dir):
     assert doc["skipped"] == [] and "errors" not in doc
 
 
-def test_cli_unimplemented_stem_skipped_on_stderr(out_dir):
-    res = CliRunner().invoke(app, ["chop", str(out_dir), "--stems", "drums,bass", "--json"])
+def test_cli_default_stems_are_those_present(out_dir):
+    # The fixture folder has only drum stems: with no --stems, bass/other/vocals are skipped silently.
+    res = CliRunner().invoke(app, ["chop", str(out_dir), "--json"])
     assert res.exit_code == 0
-    assert json.loads(res.stdout)["skipped"] == ["bass"]
-    assert "not implemented in this build" in res.stderr
+    doc = json.loads(res.stdout)
+    assert list(doc["stems"]) == ["drums"] and doc["skipped"] == []
+
+
+def test_cli_explicit_missing_stem_is_an_error(out_dir):
+    res = CliRunner().invoke(app, ["chop", str(out_dir), "--stems", "drums,bass", "--json"])
+    assert res.exit_code == 10  # drums ran, bass had no stem file
+    doc = json.loads(res.stdout)
+    assert "drums" in doc["stems"] and "bass" in doc["errors"]
 
 
 def test_cli_exit_codes(tmp_path, out_dir):
@@ -278,7 +286,7 @@ def test_cli_exit_codes(tmp_path, out_dir):
     assert CliRunner().invoke(app, ["chop", str(tmp_path / "missing")]).exit_code == 3
     assert CliRunner().invoke(app, ["chop", str(out_dir), "--stems", "kazoo"]).exit_code == 2
     assert CliRunner().invoke(app, ["chop", str(out_dir), "--sensitivity", "2"]).exit_code == 2
-    assert CliRunner().invoke(app, ["chop", str(out_dir), "--stems", "bass"]).exit_code == 6
+    assert CliRunner().invoke(app, ["chop", str(out_dir), "--stems", "bass"]).exit_code == 3  # no bass stem file
 
 
 def test_cli_partial_failure_exit_10(out_dir, monkeypatch):

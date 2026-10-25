@@ -32,7 +32,17 @@ dependencies = [
   "beat-this>=1.1,<2",
   "librosa>=0.11",
   "scipy>=1.11",
+  "auditok>=0.5.2",
 ]
+
+[project.optional-dependencies]
+# Optional extras (D-002: the core stays MIT and light; anything non-MIT or heavy is opt-in and labeled).
+words = [
+  "faster-whisper>=1.1",
+  "nvidia-cublas-cu12; sys_platform == 'linux'",
+  "nvidia-cudnn-cu12; sys_platform == 'linux'",
+]
+notes = ["muscriptor"]         # weights are CC BY-NC 4.0 (non-commercial); gcf prints a notice on first use
 
 [project.scripts]
 gcf = "grepchopflip.cli:app"

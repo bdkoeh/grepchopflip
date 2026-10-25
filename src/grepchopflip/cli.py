@@ -217,44 +217,76 @@ def analyze(
         print("overrides: " + ", ".join(f"{k}={v}" for k, v in result["overrides"].items()))
 
 
+CHOP_STEMS = ("drums", "bass", "other", "vocals")
+CHOP_EXTRAS = ("words", "notes")
+
+
 def _choppers() -> dict:
     """Stem name -> chopper(out_dir, sensitivity=..., force=...) -> summary dict. Imports are lazy so
-    `gcf --help` stays fast. Slice 5 adds the other stems here."""
+    `gcf --help` stays fast and the core never imports the extras."""
+    from grepchopflip.chop.bass import chop_bass
     from grepchopflip.chop.drums import chop_drums
+    from grepchopflip.chop.melodic import chop_melodic
+    from grepchopflip.chop.vocals import chop_vocals
 
-    return {"drums": chop_drums}
+    return {"drums": chop_drums, "bass": chop_bass, "other": chop_melodic, "vocals": chop_vocals}
 
 
-ALL_CHOP_STEMS = ("drums", "bass", "other", "vocals")
+def _extra_chopper(name: str):
+    if name == "words":
+        from grepchopflip.chop.words_whisper import chop_words
+
+        return chop_words
+    from grepchopflip.chop.notes_muscriptor import chop_notes
+
+    return chop_notes
 
 
 @app.command()
 def chop(
-    out_dir: Path = typer.Argument(..., help="Output folder produced by `gcf separate` + `gcf analyze`."),
-    stems: str = typer.Option("drums", "--stems", help="Comma-separated stems to chop: drums,bass,other,vocals."),
+    out_dir: Path = typer.Argument(..., help="Output folder of `gcf separate` + `gcf analyze`."),
+    stems: Optional[str] = typer.Option(
+        None, "--stems", help="Comma-separated stems to chop: drums,bass,other,vocals (default: every stem "
+                              "whose file exists)."),
     sensitivity: float = typer.Option(0.5, "--sensitivity", help="Onset sensitivity 0..1 (higher = more slices)."),
-    force: bool = typer.Option(False, "--force", help="Redo even if cached."),
+    force: bool = typer.Option(False, "--force", help="Ignore earlier results and rebuild."),
     as_json: bool = typer.Option(False, "--json", help="Print a JSON summary on stdout."),
+    extras: Optional[str] = typer.Option(
+        None, "--extras", help="Optional extras to run after the core: words (vocal word chops), "
+                               "notes (MuScriptor note phrases, CC BY-NC weights)."),
 ) -> None:
-    """Cut stems into one-shots and loops (drums: per-part hits and 1/2/4-bar loops)."""
+    """Cut stems into one-shots, loops, phrases (and words/notes via extras); writes WAVs plus chops.json."""
     import contextlib
     import logging
 
     from rich.logging import RichHandler
 
-    from grepchopflip.errors import InputError
+    from grepchopflip.errors import InputError, MissingDependencyError, SeparationError
 
-    wanted = [s.strip() for s in stems.split(",") if s.strip()]
-    bad = [s for s in wanted if s not in ALL_CHOP_STEMS]
-    if not wanted or bad:
-        err.print(f"error: --stems must be from {', '.join(ALL_CHOP_STEMS)}"
-                  + (f" (got {', '.join(bad)})" if bad else ""), highlight=False, markup=False)
+    if stems:
+        wanted = [s.strip() for s in stems.split(",") if s.strip()]
+        bad = [s for s in wanted if s not in CHOP_STEMS]
+        if not wanted or bad:
+            err.print(f"error: --stems must be from {', '.join(CHOP_STEMS)}"
+                      + (f" (got {', '.join(bad)})" if bad else ""), highlight=False, markup=False)
+            raise typer.Exit(EXIT_USAGE)
+        explicit = True
+    else:
+        wanted = [s for s in CHOP_STEMS if (out_dir / "stems" / f"{s}.wav").is_file()]
+        explicit = False
+    extra_names = [s.strip() for s in extras.split(",") if s.strip()] if extras else []
+    if [e for e in extra_names if e not in CHOP_EXTRAS]:
+        err.print(f"error: --extras takes {' and/or '.join(CHOP_EXTRAS)}", highlight=False, markup=False)
         raise typer.Exit(EXIT_USAGE)
     if not (0.0 <= sensitivity <= 1.0):
         err.print("error: --sensitivity must be between 0 and 1", highlight=False, markup=False)
         raise typer.Exit(EXIT_USAGE)
-    if not out_dir.is_dir():
-        err.print(f"error: {out_dir} is not a folder", highlight=False, markup=False)
+    if not (out_dir / "stems").is_dir() or not (out_dir / "analysis.json").is_file():
+        err.print(f"error: {out_dir} lacks stems/ or analysis.json; run `gcf separate` and `gcf analyze` first",
+                  highlight=False, markup=False)
+        raise typer.Exit(EXIT_INPUT)
+    if not wanted and not extra_names:
+        err.print("error: no stem files found to chop", highlight=False, markup=False)
         raise typer.Exit(EXIT_INPUT)
 
     handler = RichHandler(console=err, show_path=False, show_time=False, markup=False)
@@ -268,28 +300,41 @@ def chop(
     try:
         choppers = _choppers()
         with contextlib.redirect_stdout(sys.stderr):
-            for name in wanted:
-                fn = choppers.get(name)
-                if fn is None:
-                    err.print(f"{name}: not implemented in this build, skipped", highlight=False, markup=False)
+            # drums first: it writes chops/grid.json (corrected downbeats) that the other loops reuse
+            for name in sorted(wanted, key=lambda n: CHOP_STEMS.index(n)):
+                if not explicit and not (out_dir / "stems" / f"{name}.wav").is_file():
                     skipped.append(name)
                     continue
                 try:
-                    results[name] = fn(out_dir, sensitivity=sensitivity, force=force)
+                    results[name] = choppers[name](out_dir, sensitivity=sensitivity, force=force)
                 except InputError as e:
                     errors[name] = str(e)
                 except Exception as e:  # one stem failing must not hide the others
                     errors[name] = f"{type(e).__name__}: {e}"
                 if name in errors:
                     err.print(f"error: {name}: {errors[name]}", highlight=False, markup=False)
+            for name in extra_names:
+                key = f"extra:{name}"
+                try:
+                    r = _extra_chopper(name)(out_dir, sensitivity=sensitivity, force=force)
+                    results[key] = r
+                    if r.get("skipped"):
+                        skipped.append(key)
+                except (MissingDependencyError, SeparationError, InputError) as e:
+                    errors[key] = str(e)
+                except Exception as e:
+                    errors[key] = f"{type(e).__name__}: {e}"
+                if key in errors:
+                    err.print(f"error: {key}: {errors[key]}", highlight=False, markup=False)
     finally:
         pkg_log.removeHandler(handler)
         pkg_log.setLevel(old_level)
 
+    real = {k: v for k, v in results.items() if not v.get("skipped")}
     code = EXIT_OK
     if errors:
-        code = EXIT_PARTIAL if results else EXIT_INPUT
-    elif not results:
+        code = EXIT_PARTIAL if real else EXIT_INPUT
+    elif not real:
         code = EXIT_NOTHING
 
     if as_json:
@@ -297,26 +342,29 @@ def chop(
         if errors:
             doc["errors"] = errors
         print(json.dumps(doc, indent=2))
-        if code:
-            raise typer.Exit(code)
-        return
+    else:
+        _print_chop_results(results)
     if code:
-        if results:
-            _print_chop_results(results)
         raise typer.Exit(code)
-    _print_chop_results(results)
 
 
 def _print_chop_results(results: dict) -> None:
     for name, r in results.items():
-        print(f"{name}: {'cached' if r['cached'] else 'written'}  {r['paths']['chops_dir']}")
+        if r.get("skipped"):
+            print(f"{name}: skipped ({r.get('reason', 'not available')})")
+            continue
+        where = r.get("chops_json") or r.get("paths", {}).get("chops_dir", "")
+        print(f"{name}: {'cached' if r.get('cached') else 'written'}  {where}")
         if "parts" in r:
             for part, c in r["parts"].items():
                 print(f"  {part}: {c['oneshots']} hits ({c['review']} to review)")
-            if r["loops"]:
+            if r.get("loops"):
                 print("  loops: " + ", ".join(f"{k}-bar x{v}" for k, v in sorted(r["loops"].items())))
-            elif r["loops_skipped"]:
+            elif r.get("loops_skipped"):
                 print(f"  loops skipped: {r['loops_skipped']}")
+        elif "counts" in r:
+            counts = ", ".join(f"{k} {v}" for k, v in r["counts"].items()) or "nothing"
+            print(f"  {counts}")
 
 
 if __name__ == "__main__":  # pragma: no cover
