@@ -20,3 +20,12 @@ def cache_dir() -> Path:
 
 def models_dir() -> Path:
     return cache_dir() / "models"
+
+
+def library_dir() -> Path:
+    """Default parent of the per-song folders (D-030). GCF_LIBRARY wins; else ~/Music/gcf-library.
+    A per-run `--library DIR` sets GCF_LIBRARY for that process; `-o/--out` overrides all of it."""
+    env = os.environ.get("GCF_LIBRARY")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / "Music" / "gcf-library"

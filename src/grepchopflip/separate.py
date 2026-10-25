@@ -17,7 +17,7 @@ from typing import Any
 import soundfile as sf
 
 from grepchopflip import __version__, audio_io, cache
-from grepchopflip.config import cache_dir, models_dir
+from grepchopflip.config import cache_dir, library_dir, models_dir
 from grepchopflip.errors import InputError, MissingDependencyError, SeparationError
 from grepchopflip.paths import song_slug
 
@@ -219,7 +219,7 @@ def separate(
 ) -> dict:
     """Split `path` into 4 stems and 6 drum parts under `out_dir/stems`. Cached unless `force`.
 
-    `out_dir` defaults to `./out/<song_slug>`. Raises errors.InputError (exit 3),
+    `out_dir` defaults to `<library>/<song_slug>` (config.library_dir). Raises errors.InputError (exit 3),
     errors.MissingDependencyError (exit 4) or errors.SeparationError (exit 5). Library output that would
     reach stdout is redirected to stderr, so callers can keep stdout for results.
     """
@@ -230,7 +230,7 @@ def separate(
 def _separate(path: Path, out_dir, fast: bool, device: str, force: bool) -> dict:
     t_start = time.perf_counter()
     source = audio_io.probe(path)
-    out_dir = (Path("out") / song_slug(path, source.sha256)) if out_dir is None else Path(out_dir)
+    out_dir = (library_dir() / song_slug(path, source.sha256)) if out_dir is None else Path(out_dir)
     out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     fh = _attach_file_log(out_dir)

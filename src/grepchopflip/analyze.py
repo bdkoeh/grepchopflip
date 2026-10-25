@@ -15,6 +15,7 @@ from grepchopflip import __version__
 from grepchopflip import beats as beats_mod
 from grepchopflip import key as key_mod
 from grepchopflip.beats import AudioReadError, analyze_beats, load_mono
+from grepchopflip.config import library_dir
 from grepchopflip.key import NOTES, estimate_key, null_key, parse_key, relative_key
 from grepchopflip.models import BEAT_THIS_SHA256
 from grepchopflip.paths import song_slug
@@ -112,7 +113,7 @@ def _resolve_inputs(audio_or_out: Path | str, out_dir: Path | str | None):
     if not p.is_file():
         raise AudioReadError(f"Input not found: {p}")
     # Same folder rule as `gcf separate` (paths.song_slug), so analyze finds the stems it produced.
-    out = Path(out_dir) if out_dir else Path("out") / song_slug(p, sha256_path(p))
+    out = Path(out_dir) if out_dir else library_dir() / song_slug(p, sha256_path(p))
     return out, [p], _stem_paths(out, ALL_STEMS)
 
 

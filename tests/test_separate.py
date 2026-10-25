@@ -122,9 +122,20 @@ def test_stale_outputs_never_survive_a_failed_rerun(fake, wav, tmp_path):
 
 def test_default_out_dir_uses_slug(fake, wav, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GCF_LIBRARY", str(tmp_path / "lib"))
     r = sep.separate(wav, device="cpu")
-    assert r["out_dir"].startswith(str((tmp_path / "out").resolve()))
+    assert r["out_dir"].startswith(str((tmp_path / "lib").resolve()))       # D-030: <library>/<slug>
     assert r["out_dir"].split("/")[-1].startswith("in-")
+    r2 = sep.separate(wav, tmp_path / "explicit", device="cpu")             # -o wins over the library
+    assert r2["out_dir"] == str((tmp_path / "explicit").resolve())
+
+
+def test_library_flag_sets_the_default_folder(fake, wav, tmp_path, monkeypatch):
+    monkeypatch.setenv("GCF_LIBRARY", str(tmp_path / "other"))      # restored at teardown; the flag overrides it
+    res = CliRunner().invoke(cli.app, ["separate", str(wav), "--library", str(tmp_path / "mylib"), "--device", "cpu",
+                                   "--json"])
+    assert res.exit_code == 0
+    assert json.loads(res.stdout)["out_dir"].startswith(str((tmp_path / "mylib").resolve()))
 
 
 def test_library_stdout_is_redirected(fake, wav, tmp_path, capsys):

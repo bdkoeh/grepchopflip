@@ -1,0 +1,544 @@
+"""Slice 6: turn the chop stages' working folders into a browsable sample library and write index.json.
+
+Layout written under the song folder (D-031, D-021): kind first, then instrument; material the chop stages
+flagged `needs_review` goes to the same subtree under `review/`.
+
+    oneshots/{kick,snare,tom,hat,cymbal,perc,bass}   loops/{drums,bass,melodic}
+    phrases/{melodic,vocals}                          words/vocals                review/<the same>
+
+Each sample is rewritten once with a short name (D-032) and an INFO chunk; its `path` in the originating
+`chops*.json` is updated so the chop stages' caches stay valid. `.organize.json` records what was placed
+(path, sha256, naming inputs, cached loudness) so a second run changes nothing and a later `gcf chop
+--force` leaves only stale files that the next run removes.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import time
+import zlib
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+
+from grepchopflip import __version__
+from grepchopflip.errors import InputError
+from grepchopflip.index_schema import INDEX_NAME, INDEX_SCHEMA_VERSION
+from grepchopflip.loudness import Levels, measure
+
+log = logging.getLogger("grepchopflip.organize")
+
+STATE_NAME = ".organize.json"
+MAX_NAME = 40                      # whole filename, including ".wav"
+REVIEW = "review"
+TOP_FOLDERS = ("oneshots", "loops", "phrases", "words", REVIEW)
+
+PART_CLASS = {"kick": "Kick", "snare": "Snare", "toms": "Tom", "hh": "Hat", "ride": "Ride", "crash": "Crash"}
+CLASS_FOLDER = {
+    "Kick": "oneshots/kick", "Snare": "oneshots/snare", "Tom": "oneshots/tom", "Hat": "oneshots/hat",
+    "Ride": "oneshots/cymbal", "Crash": "oneshots/cymbal", "Perc": "oneshots/perc", "Bass": "oneshots/bass",
+    "DrumLoop": "loops/drums", "BassLoop": "loops/bass", "MelLoop": "loops/melodic",
+    "Mel": "phrases/melodic", "Vox": "phrases/vocals", "Word": "words/vocals",
+}
+LOOP_CLASSES = ("DrumLoop", "BassLoop", "MelLoop")
+ROOT_MIN_CONFIDENCE = 0.5
+
+
+# ----------------------------------------------------------------------------- records and context
+
+@dataclass
+class Rec:
+    doc_path: Path
+    idx: int
+    chop: dict
+
+    @property
+    def path(self) -> str:
+        return self.chop["path"]
+
+
+@dataclass
+class Context:
+    song_dir: Path
+    source: dict
+    analysis: dict
+    bpm: float | None            # song tempo when reliable, else None
+    key: str | None
+    mode: str | None
+
+    @property
+    def song_name(self) -> str:
+        return str(self.source.get("name") or self.song_dir.name)
+
+
+def _read_json(p: Path) -> dict:
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def load_docs(song: Path) -> dict[Path, dict]:
+    chops_dir = song / "chops"
+    docs: dict[Path, dict] = {}
+    for p in sorted(chops_dir.rglob("chops*.json")) if chops_dir.is_dir() else []:
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise InputError(f"unreadable {p}: {e}")
+        if isinstance(d, dict) and isinstance(d.get("chops"), list):
+            docs[p] = d
+    if not docs:
+        raise InputError(f"no chops*.json under {chops_dir}; run `gcf chop` first")
+    return docs
+
+
+def load_records(docs: dict[Path, dict]) -> list[Rec]:
+    return [Rec(p, i, c) for p, d in docs.items() for i, c in enumerate(d["chops"])]
+
+
+def load_context(song: Path) -> Context:
+    source = _read_json(song / "source.json")
+    ana = _read_json(song / "analysis.json")
+    bpm = ana.get("bpm") if ana.get("tempo_reliable") and ana.get("bpm") else None
+    key, mode = ana.get("key"), ana.get("mode")
+    if not (key and mode):
+        key = mode = None
+    return Context(song, source, ana, float(bpm) if bpm else None, key, mode)
+
+
+# ----------------------------------------------------------------------------- classes, names
+
+def classify(c: dict) -> str:
+    kind, stem = c.get("kind"), c.get("stem")
+    if kind == "oneshot":
+        if stem == "bass":
+            return "Bass"
+        return PART_CLASS.get(c.get("part") or "", "Perc") if stem == "drums" else "Perc"
+    if kind == "loop":
+        return {"drums": "DrumLoop", "bass": "BassLoop"}.get(stem, "MelLoop")
+    if kind == "phrase":
+        return "Vox" if stem == "vocals" else "Mel"
+    if kind == "word":
+        return "Word"
+    return "Perc"
+
+
+def key_name(key: str, mode: str) -> str:
+    return key + ("m" if mode == "minor" else "maj")
+
+
+def facts(c: dict, ctx: Context) -> dict:
+    """Class, folder and the musical facts that go in the name and the index."""
+    from grepchopflip.key import parse_key
+
+    cls = classify(c)
+    extra = c.get("extra") or {}
+    key = mode = None
+    if cls == "MelLoop":
+        key, mode = ctx.key, ctx.mode
+    elif cls == "Mel" and extra.get("key") and extra.get("key_reliable"):
+        try:
+            key, mode = parse_key(str(extra["key"]))
+        except ValueError:
+            pass
+    root = None
+    if cls in ("Bass", "Vox") and c.get("root_note") and (c.get("root_confidence") or 0) >= ROOT_MIN_CONFIDENCE:
+        root = c["root_note"]
+    bpm = ctx.bpm if c.get("kind") in ("loop", "phrase") else None
+    return {"cls": cls, "folder": CLASS_FOLDER[cls], "bpm": bpm, "key": key, "mode": mode, "root": root,
+            "review": bool(c.get("needs_review"))}
+
+
+def build_name(cls: str, num: int, width: int, c: dict, f: dict) -> str:
+    """`Kick_01`, `DrumLoop_03_2bar_92bpm`, `Bass_04_F#1`, `Vox_05_phrase_92bpm_B4` (without extension)."""
+    head = f"{cls}_{num:0{width}d}"
+    if cls in LOOP_CLASSES and c.get("bars"):
+        head += f"_{int(c['bars'])}bar"
+    elif cls in ("Mel", "Vox"):
+        head += "_phrase"
+    optional = []
+    if f["bpm"]:
+        optional.append(f"{int(round(f['bpm']))}bpm")
+    if f["key"] and f["mode"]:
+        optional.append(key_name(f["key"], f["mode"]))
+    elif f["root"]:
+        optional.append(str(f["root"]))
+    while optional and len("_".join([head, *optional])) + 4 > MAX_NAME:
+        optional.pop()
+    name = "_".join([head, *optional])
+    return name[: MAX_NAME - 4]
+
+
+def plan_names(recs: list[Rec], ctx: Context) -> dict[int, tuple[dict, str]]:
+    """id(rec) -> (facts, target path relative to the song folder). Numbers follow source position within a
+    class (loops: bar length first), shared by kept and review material."""
+    by_cls: dict[str, list[tuple[Rec, dict]]] = {}
+    for r in recs:
+        f = facts(r.chop, ctx)
+        by_cls.setdefault(f["cls"], []).append((r, f))
+    out: dict[int, tuple[dict, str]] = {}
+    used: set[str] = set()
+    for cls in sorted(by_cls):
+        items = sorted(by_cls[cls], key=lambda t: (
+            int(t[0].chop.get("bars") or 0) if cls in LOOP_CLASSES else 0,
+            float(t[0].chop.get("source_start_s") or 0.0), str(t[0].chop.get("id", ""))))
+        width = 3 if len(items) > 99 else 2
+        for n, (r, f) in enumerate(items, 1):
+            name = build_name(cls, n, width, r.chop, f)
+            folder = f"{REVIEW}/{f['folder']}" if f["review"] else f["folder"]
+            rel, suffix = f"{folder}/{name}.wav", 0
+            while rel.lower() in used:
+                suffix += 1
+                rel = f"{folder}/{name}_{chr(ord('a') + suffix)}.wav"
+            used.add(rel.lower())
+            out[id(r)] = (f, rel)
+    return out
+
+
+# ----------------------------------------------------------------------------- writing audio
+
+def _sha256(p: Path) -> str:
+    h = hashlib.sha256()
+    with open(p, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _comment(c: dict, f: dict) -> str:
+    parts = [f"id={c.get('id')}"]
+    if f["bpm"]:
+        parts.append(f"bpm={int(round(f['bpm']))}")
+    if f["root"]:
+        parts.append(f"root={f['root']}")
+    if f["key"] and f["mode"]:
+        parts.append(f"key={key_name(f['key'], f['mode'])}")
+    return " ".join(parts)
+
+
+def write_clip(src: Path, tmp: Path, bit_depth: int, title: str, artist: str, comment: str) -> dict:
+    """Rewrite `src` to `tmp` with an INFO chunk. The source is read as int32, so 24-bit data is copied
+    bit-exactly; 16-bit gets TPDF dither (unless the source is already 16-bit). Returns file facts."""
+    sinfo = sf.info(str(src))
+    data, sr = sf.read(str(src), dtype="int32", always_2d=True)
+    if bit_depth == 24:
+        out, subtype = data, "PCM_24"
+        floats = data.astype(np.float64) / 2147483648.0
+    else:
+        subtype = "PCM_16"
+        if sinfo.subtype == "PCM_16":
+            out = (data >> 16).astype(np.int16)
+        else:
+            rng = np.random.default_rng(zlib.crc32(title.encode()))
+            x = data.astype(np.float64) / 65536.0
+            tpdf = rng.random(x.shape) - rng.random(x.shape)
+            out = np.clip(np.rint(x + tpdf), -32768, 32767).astype(np.int16)
+        floats = out.astype(np.float64) / 32768.0
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    with sf.SoundFile(str(tmp), "w", samplerate=int(sr), channels=int(data.shape[1]), subtype=subtype,
+                      format="WAV") as f:
+        # libsndfile writes the INFO chunk with the first audio write: strings must be set before it
+        f.title, f.artist, f.comment, f.software = title, artist, comment, f"gcf {__version__}"
+        f.write(out)
+    return {"sha256": _sha256(tmp), "levels": measure(floats, int(sr)), "frames": int(len(data)),
+            "channels": int(data.shape[1]), "sample_rate": int(sr), "bit_depth": bit_depth}
+
+
+def describe_file(p: Path, levels_cache: dict[str, dict]) -> dict:
+    """Facts of an existing clip (hash, levels via the cache keyed by hash, format)."""
+    sha = _sha256(p)
+    info = sf.info(str(p))
+    bits = {"PCM_16": 16, "PCM_24": 24, "PCM_32": 32}.get(info.subtype, 0)
+    lv = levels_cache.get(sha)
+    if lv is None:
+        data, sr = sf.read(str(p), dtype="float64", always_2d=True)
+        lv = measure(data, int(sr)).to_dict()
+    return {"sha256": sha, "levels": Levels(**lv), "frames": int(info.frames), "channels": int(info.channels),
+            "sample_rate": int(info.samplerate), "bit_depth": bits}
+
+
+# ----------------------------------------------------------------------------- state
+
+def read_state(song: Path) -> dict:
+    s = _read_json(song / STATE_NAME)
+    s.setdefault("files", {})
+    s.setdefault("levels", {})
+    return s
+
+
+def _write_json_if_changed(p: Path, doc: dict, **dump) -> bool:
+    text = json.dumps(doc, **dump) + "\n"
+    try:
+        if p.read_text(encoding="utf-8") == text:
+            return False
+    except OSError:
+        pass
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, p)
+    return True
+
+
+# ----------------------------------------------------------------------------- index
+
+def _title_of(name: str | None) -> str | None:
+    if not name:
+        return None
+    return Path(name).stem.replace("_", " ").strip() or None
+
+
+def sample_row(c: dict, f: dict, path: str, fi: dict, sid: str) -> dict:
+    lv: Levels = fi["levels"]
+    extra = c.get("extra") or {}
+    reasons = list(extra.get("review_reasons") or [])
+    sr = fi["sample_rate"]
+    return {
+        "id": sid, "path": path, "stem": c.get("stem"), "part": c.get("part"), "kind": c.get("kind"),
+        "class": f["cls"], "needs_review": bool(c.get("needs_review")), "review_reasons": reasons,
+        "source_start_s": c.get("source_start_s"), "source_end_s": c.get("source_end_s"),
+        "duration_s": round(fi["frames"] / sr, 6) if sr else 0.0,
+        "source_start_bar": c.get("bar"), "start_beat": c.get("start_beat"),
+        "length_beats": c.get("length_beats"), "bars": c.get("bars"), "bpm": f["bpm"],
+        "channels": fi["channels"], "sample_rate": sr, "bit_depth": fi["bit_depth"],
+        "root_midi": c.get("root_midi"), "root_note": c.get("root_note"),
+        "root_confidence": c.get("root_confidence"), "key": f["key"], "mode": f["mode"],
+        "peak_dbfs": lv.peak_dbfs if lv.peak_dbfs is not None else c.get("peak_dbfs"),
+        "rms_dbfs": lv.rms_dbfs if lv.rms_dbfs is not None else c.get("rms_dbfs"),
+        "crest_db": lv.crest_db, "lufs_i": lv.lufs_i, "lufs_measure": lv.lufs_measure,
+        "fade_in_ms": c.get("fade_in_ms"), "fade_out_ms": c.get("fade_out_ms"),
+        "zero_snapped": c.get("zero_snapped"),
+        "character": None, "dedup_group": None, "is_dedup_representative": None, "tags": [],
+        "source_file": c.get("source_file"), "source_sha256": c.get("source_sha256"), "sha256": fi["sha256"],
+    }
+
+
+def _unique_ids(rows: list[dict]) -> None:
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["id"]] = counts.get(r["id"], 0) + 1
+    seen: set[str] = set()
+    for r in rows:
+        sid = r["id"]
+        if counts[sid] > 1:
+            sid = f"{r['stem']}_{sid}"
+        base, n = sid, 1
+        while sid in seen:
+            n += 1
+            sid = f"{base}_{n}"
+        seen.add(sid)
+        r["id"] = sid
+
+
+def _stages(song: Path, docs: dict[Path, dict], organized: bool, bit_depth: int, ctx: Context) -> dict:
+    chop_files = {}
+    for p, d in docs.items():
+        chop_files[p.relative_to(song).as_posix()] = {
+            "stage": d.get("stage"), "total": len(d["chops"]),
+            "fingerprint": (d.get("params") or {}).get("fingerprint")}
+    stems_ok = all((song / "stems" / f"{s}.wav").is_file() for s in ("drums", "bass", "other", "vocals"))
+    return {
+        "separate": {"done": stems_ok},
+        "analyze": {"done": bool(ctx.analysis), "gcf_version": ctx.analysis.get("gcf_version")},
+        "chop": {"done": True, "files": chop_files},
+        "organize": {"done": organized, "bit_depth": bit_depth},
+    }
+
+
+def make_index(song: Path, ctx: Context, docs: dict[Path, dict], rows: list[dict], organized: bool,
+               bit_depth: int, created: str | None = None) -> dict:
+    src, ana = ctx.source, ctx.analysis
+    rows = sorted(rows, key=lambda r: r["path"])
+    _unique_ids(rows)
+    return {
+        "schema_version": INDEX_SCHEMA_VERSION,
+        "generator": {"name": "gcf", "version": __version__},
+        "created": created or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "source": {
+            "path": src.get("path"), "name": src.get("name"), "sha256": src.get("sha256"),
+            "duration_s": src.get("duration_s"), "sample_rate": src.get("sample_rate"),
+            "channels": src.get("channels"), "title": _title_of(src.get("name")), "artist": None,
+            "license": "unknown",
+        },
+        "analysis": {
+            "bpm": ana.get("bpm"), "bpm_confidence": ana.get("bpm_confidence"),
+            "tempo_reliable": bool(ana.get("tempo_reliable")), "beats_per_bar": ana.get("beats_per_bar"),
+            "key": ana.get("key"), "mode": ana.get("mode"), "key_confidence": ana.get("key_confidence"),
+            "key_reliable": bool(ana.get("key_reliable")), "grid_source": ana.get("grid_source"),
+            "grid_consistency": ana.get("grid_consistency"), "downbeats_s": list(ana.get("downbeats_s") or []),
+        },
+        "models": ana.get("models") or {},
+        "params": {"bit_depth": bit_depth, "normalize": "peak"},
+        "stages": _stages(song, docs, organized, bit_depth, ctx),
+        "samples": rows,
+    }
+
+
+def write_index(song: Path, doc: dict) -> bool:
+    """Write index.json unless it is identical apart from `created` (then the old file, and its time, stay)."""
+    p = song / INDEX_NAME
+    old = _read_json(p)
+    if old and {k: v for k, v in old.items() if k != "created"} == {k: v for k, v in doc.items() if k != "created"}:
+        return False
+    return _write_json_if_changed(p, doc, indent=2, ensure_ascii=False)
+
+
+def rebuild_index(song_dir: Path) -> dict:
+    """`gcf index`: rebuild index.json from the current records without moving or rewriting any audio."""
+    song = Path(song_dir)
+    if not song.is_dir():
+        raise InputError(f"not a folder: {song}")
+    docs = load_docs(song)
+    recs = load_records(docs)
+    ctx = load_context(song)
+    state = read_state(song)
+    rows, problems = [], []
+    for r in recs:
+        src = song / r.path
+        if not src.is_file():
+            problems.append(f"{r.chop.get('id')}: {r.path} not found")
+            continue
+        fi = describe_file(src, state["levels"])
+        rows.append(sample_row(r.chop, facts(r.chop, ctx), r.path, fi, str(r.chop.get("id"))))
+    organized = bool(rows) and all(not r["path"].startswith("chops/") for r in rows)
+    bit_depth = int(state.get("bit_depth") or (rows[0]["bit_depth"] if rows else 24))
+    old = _read_json(song / INDEX_NAME)
+    doc = make_index(song, ctx, docs, rows, organized, bit_depth, created=None)
+    changed = write_index(song, doc)
+    return {"song_dir": str(song), "index": INDEX_NAME, "samples": len(rows), "changed": changed,
+            "organized": organized, "problems": problems, "previous": bool(old)}
+
+
+# ----------------------------------------------------------------------------- organize
+
+def _prune_empty(root: Path, keep_root: bool) -> int:
+    n = 0
+    if not root.is_dir():
+        return 0
+    for d, _dirs, _files in os.walk(root, topdown=False):
+        dp = Path(d)
+        if keep_root and dp == root:
+            continue
+        try:
+            dp.rmdir()
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
+def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
+    t0 = time.perf_counter()
+    song = Path(song_dir)
+    if not song.is_dir():
+        raise InputError(f"not a folder: {song}")
+    if bit_depth not in (16, 24):
+        raise InputError("bit depth must be 16 or 24")
+    docs = load_docs(song)
+    recs = load_records(docs)
+    ctx = load_context(song)
+    state = read_state(song)
+    prev_files: dict[str, dict] = state["files"]
+    plan = plan_names(recs, ctx)
+    artist = ctx.song_name
+    problems: list[str] = []
+
+    # decide per record: reuse the file where it is, or rewrite it at its target
+    todo: list[tuple[Rec, Path, str, dict]] = []     # (rec, src, dst_rel, facts)
+    reused: list[tuple[Rec, str, dict, dict]] = []   # (rec, dst_rel, facts, file facts)
+    for r in recs:
+        f, dst_rel = plan[id(r)]
+        src = song / r.path
+        if not src.is_file():
+            problems.append(f"{r.chop.get('id')}: {r.path} not found")
+            continue
+        name = Path(dst_rel).stem
+        meta = hashlib.sha1(json.dumps([name, artist, __version__, _comment(r.chop, f), bit_depth]).encode()).hexdigest()
+        f["_meta"] = meta
+        ent = prev_files.get(r.path)
+        if (not force and r.path == dst_rel and ent and ent.get("meta") == meta
+                and ent.get("bit_depth") == bit_depth and ent.get("sha256") == _sha256(src)):
+            reused.append((r, dst_rel, f, describe_file(src, state["levels"])))
+        else:
+            todo.append((r, src, dst_rel, f))
+
+    # write every new file next to its target first, so a name can move between records safely
+    written: list[tuple[Rec, str, dict, dict, Path]] = []
+    for r, src, dst_rel, f in todo:
+        dst = song / dst_rel
+        tmp = dst.with_name(dst.name + ".gcf-tmp")
+        fi = write_clip(src, tmp, bit_depth, Path(dst_rel).stem, artist, _comment(r.chop, f))
+        written.append((r, dst_rel, f, fi, tmp))
+
+    final_paths = {dst for _, dst, _, _ in reused} | {dst for _, dst, _, _, _ in written}
+    removed = 0
+    # sources that moved, then organized files from earlier runs that no record points at any more
+    for r, dst_rel, _f, _fi, _tmp in written:
+        if r.path != dst_rel and r.path not in final_paths:
+            (song / r.path).unlink(missing_ok=True)
+            removed += 1
+    stale = set(prev_files) | {s.get("path") for s in _read_json(song / INDEX_NAME).get("samples", [])
+                               if isinstance(s, dict)}
+    for p in sorted(x for x in stale if isinstance(x, str) and x not in final_paths
+                    and not x.startswith("chops/") and ".." not in Path(x).parts):
+        fp = song / p
+        if fp.is_file():
+            fp.unlink()
+            removed += 1
+    for r, dst_rel, f, fi, tmp in written:
+        os.replace(tmp, song / dst_rel)
+
+    # point the records at the new files
+    changed_docs = 0
+    for r, dst_rel in [*((a, b) for a, b, _, _ in reused), *((a, b) for a, b, _, _, _ in written)]:
+        docs[r.doc_path]["chops"][r.idx]["path"] = dst_rel
+    for p, d in docs.items():
+        before = p.read_text(encoding="utf-8")
+        after = json.dumps(d, indent=2)
+        if before != after:
+            tmp = p.with_name(p.name + ".tmp")
+            tmp.write_text(after, encoding="utf-8")
+            os.replace(tmp, p)
+            changed_docs += 1
+
+    # tidy: empty folders under chops/<stem>/ and in the organized tree
+    pruned = 0
+    for d in sorted((song / "chops").iterdir()) if (song / "chops").is_dir() else []:
+        if d.is_dir():
+            pruned += _prune_empty(d, keep_root=True)
+    for top in TOP_FOLDERS:
+        pruned += _prune_empty(song / top, keep_root=False)
+
+    # state and index
+    rows: list[dict] = []
+    files: dict[str, dict] = {}
+    levels: dict[str, dict] = {}
+    for r, dst_rel, f, fi in [*reused, *[(a, b, c, d) for a, b, c, d, _ in written]]:
+        files[dst_rel] = {"sha256": fi["sha256"], "meta": f["_meta"], "bit_depth": bit_depth, "id": r.chop.get("id")}
+        levels[fi["sha256"]] = fi["levels"].to_dict()
+        rows.append(sample_row(r.chop, f, dst_rel, fi, str(r.chop.get("id"))))
+    new_state = {"version": 1, "bit_depth": bit_depth, "files": dict(sorted(files.items())),
+                 "levels": dict(sorted(levels.items()))}
+    state_changed = _write_json_if_changed(song / STATE_NAME, new_state, indent=1, sort_keys=True)
+    doc = make_index(song, ctx, docs, rows, organized=not problems, bit_depth=bit_depth)
+    index_changed = write_index(song, doc)
+
+    counts: dict[str, int] = {}
+    for r in rows:
+        k = str(Path(r["path"]).parent.as_posix())
+        counts[k] = counts.get(k, 0) + 1
+    did_work = bool(written or removed or changed_docs or index_changed or state_changed)
+    return {
+        "song_dir": str(song), "cached": not did_work, "samples": len(rows), "written": len(written),
+        "reused": len(reused), "removed": removed, "records_updated": changed_docs, "folders_pruned": pruned,
+        "bit_depth": bit_depth, "index": INDEX_NAME, "counts": dict(sorted(counts.items())),
+        "review": sum(1 for r in rows if r["needs_review"]), "problems": problems,
+        "seconds": round(time.perf_counter() - t0, 2),
+    }
