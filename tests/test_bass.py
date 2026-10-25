@@ -110,3 +110,60 @@ def test_missing_inputs(tmp_path):
     from grepchopflip.errors import InputError
     with pytest.raises(InputError):
         chop_bass(tmp_path)
+
+
+def _flat_bass_job(tmp_path, **analysis_over):
+    y, _ = _bass()
+    root = write_job(tmp_path, {"bass": y}, SECONDS)
+    if analysis_over:
+        f = root / "analysis.json"
+        ana = json.loads(f.read_text())
+        ana.update(analysis_over)
+        f.write_text(json.dumps(ana))
+    return root
+
+
+def _chops(root):
+    return json.loads((root / "chops/bass/chops.json").read_text())["chops"]
+
+
+def test_every_bass_chop_has_a_review_reasons_list_and_clean_ones_are_empty(tmp_path):
+    root = _flat_bass_job(tmp_path)
+    chop_bass(root, force=True)
+    for c in _chops(root):
+        assert isinstance(c["extra"]["review_reasons"], list)
+        assert bool(c["extra"]["review_reasons"]) == c["needs_review"]
+
+
+def test_bass_pitch_spread_flag_records_its_reason(tmp_path, monkeypatch):
+    from grepchopflip.chop import bass
+    real = bass.slice_pitch
+
+    def wobbly(*a, **k):
+        st = real(*a, **k)
+        st["spread_semitones"] = 2.25
+        return st
+
+    monkeypatch.setattr(bass, "slice_pitch", wobbly)
+    root = _flat_bass_job(tmp_path)
+    chop_bass(root, force=True)
+    shots = [c for c in _chops(root) if c["kind"] == "oneshot"]
+    assert shots and all(c["needs_review"] for c in shots)
+    assert all(c["extra"]["review_reasons"] == ["pitch_spread=2.25st"] for c in shots)
+
+
+def test_shaky_grid_flags_loops_with_the_drum_wording(tmp_path):
+    root = _flat_bass_job(tmp_path, grid_source="normalized_half", grid_consistency=0.55)
+    chop_bass(root, force=True)
+    loops = [c for c in _chops(root) if c["kind"] == "loop"]
+    assert loops and all(c["needs_review"] for c in loops)
+    assert all(c["extra"]["review_reasons"] == ["grid_source=normalized_half", "grid_consistency=0.55"]
+               for c in loops)
+
+
+def test_steady_grid_loops_have_an_empty_reasons_list(tmp_path):
+    root = _flat_bass_job(tmp_path, grid_source="tracked", grid_consistency=0.95)
+    chop_bass(root, force=True)
+    loops = [c for c in _chops(root) if c["kind"] == "loop"]
+    assert loops and not any(c["needs_review"] for c in loops)
+    assert all(c["extra"]["review_reasons"] == [] for c in loops)

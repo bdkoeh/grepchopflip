@@ -26,10 +26,11 @@ from grepchopflip.errors import MissingDependencyError, SeparationError
 
 log = logging.getLogger("grepchopflip.chop")
 
-ALGO = "words-1"
+ALGO = "words-2"
 MODEL = "turbo"
 PAD_S = 0.02
 MIN_WORD_S = 0.06
+LOW_WORD_PROBABILITY = 0.5   # words recognised with less confidence than this are flagged needs_review
 HINT = "word chops skipped: install the extra with `uv sync --extra words` (or pip install grepchopflip[words])"
 
 
@@ -125,6 +126,7 @@ def chop_words(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, 
             st = pitch_stats(raw, sr, 80.0, 1000.0)
             midi = int(round(st["midi_float"])) if st["midi_float"] is not None else None
             out = peak_normalize(apply_fades(raw, sr, 2.0, 6.0), -1.0)
+            low = bool(w.probability < LOW_WORD_PROBABILITY)
             idx = len(chops) + 1
             name = f"word_{idx:04d}"
             rel = f"chops/vocals/words/{name}.wav"
@@ -137,10 +139,11 @@ def chop_words(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, 
                 length_beats=round((b - a) / sr / job.beat_s, 3), root_midi=midi,
                 root_note=midi_to_name(midi) if midi is not None else None,
                 root_confidence=round(st["voiced_fraction"], 3), peak_dbfs=peak_dbfs(out),
-                rms_dbfs=rms_dbfs(out), fade_in_ms=2.0, fade_out_ms=6.0, needs_review=bool(w.probability < 0.5),
+                rms_dbfs=rms_dbfs(out), fade_in_ms=2.0, fade_out_ms=6.0, needs_review=low,
                 extra={"text": text, "probability": round(float(w.probability), 3),
                        "whisper_start_s": round(float(w.start), 3), "whisper_end_s": round(float(w.end), 3),
-                       "source": "faster-whisper"},
+                       "source": "faster-whisper",
+                       "review_reasons": [f"low_word_confidence={float(w.probability):.2f}"] if low else []},
             ), a, b))
     params["notes"] = notes
     log.info("words: %d word chops (%s)", len(chops), device)

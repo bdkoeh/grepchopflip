@@ -20,7 +20,7 @@ from grepchopflip.key import estimate_key_from_chroma
 
 log = logging.getLogger("grepchopflip.chop")
 
-ALGO = "melodic-3"
+ALGO = "melodic-4"
 CHROMA_SR = 22050
 CHROMA_HOP = 512
 ONSET_DELTA = 0.05

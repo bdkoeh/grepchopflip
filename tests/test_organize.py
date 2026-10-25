@@ -434,3 +434,16 @@ def test_library_dir(monkeypatch, tmp_path):
     assert library_dir() == Path.home() / "Music" / "gcf-library"
     monkeypatch.setenv("GCF_LIBRARY", str(tmp_path / "lib"))
     assert library_dir() == tmp_path / "lib"
+
+
+def test_bass_review_reason_reaches_index_json(song):
+    cj = song / "chops/bass/chops.json"
+    doc = json.loads(cj.read_text(encoding="utf-8"))
+    shot = next(c for c in doc["chops"] if c["kind"] == "oneshot")
+    shot["needs_review"] = True
+    shot["extra"]["review_reasons"] = ["pitch_spread=2.25st"]
+    cj.write_text(json.dumps(doc), encoding="utf-8")
+    org.organize(song)
+    s = _by_id(song)[shot["id"]]
+    assert s["needs_review"] is True and s["review_reasons"] == ["pitch_spread=2.25st"]
+    assert s["path"].startswith("review/")
