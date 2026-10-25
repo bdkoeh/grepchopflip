@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
+from typing import Optional
 
 import typer
 from rich.console import Console
@@ -30,6 +32,7 @@ EXIT_USAGE = 2
 EXIT_INPUT = 3
 EXIT_MISSING_DEP = 4
 EXIT_GPU = 5
+EXIT_MODEL = 5  # model download failure (same number as GPU problems, per slice 3 spec)
 EXIT_NOTHING = 6
 EXIT_PARTIAL = 10
 
@@ -98,6 +101,51 @@ def info(
         raise typer.Exit(EXIT_MISSING_DEP)
     if codes & {"torch-cpu-only", "no-nvidia-driver", "cuda-unavailable", "driver-too-old", "no-sm120"}:
         raise typer.Exit(EXIT_GPU)
+
+
+@app.command()
+def analyze(
+    path: Path = typer.Argument(..., help="Song file, or an existing output folder (source.json / stems/)."),
+    out: Optional[Path] = typer.Option(None, "-o", "--out", help="Output folder (default: out/<song> or the given folder)."),
+    bpm: Optional[float] = typer.Option(None, "--bpm", help="Override the tempo (recorded as an override)."),
+    key: Optional[str] = typer.Option(None, "--key", help="Override the key, e.g. 'A minor' or 'F#m'."),
+    force: bool = typer.Option(False, "--force", help="Recompute even if cached."),
+    as_json: bool = typer.Option(False, "--json", help="Print the analysis as JSON on stdout."),
+) -> None:
+    """Tempo, beats, bars and key; writes analysis.json."""
+    from grepchopflip.analyze import analyze as run_analyze
+    from grepchopflip.beats import AudioReadError
+    from grepchopflip.models import ModelDownloadError
+
+    try:
+        result = run_analyze(path, out_dir=out, bpm_override=bpm, key_override=key, force=force)
+    except AudioReadError as e:
+        err.print(f"error: {e}", highlight=False, markup=False)
+        raise typer.Exit(EXIT_INPUT)
+    except ValueError as e:
+        err.print(f"error: {e}", highlight=False, markup=False)
+        raise typer.Exit(EXIT_USAGE)
+    except ModelDownloadError as e:
+        err.print(f"error: {e}", highlight=False, markup=False)
+        raise typer.Exit(EXIT_MODEL)
+
+    if as_json:
+        print(json.dumps(result, indent=2))
+        return
+
+    bpm_v = result["bpm"]
+    flag = "" if result["tempo_reliable"] else "  (tempo unreliable)"
+    print(f"bpm: {bpm_v}  confidence {result['bpm_confidence']:.2f}{flag}" if bpm_v else "bpm: unknown (tempo unreliable)")
+    print(f"meter: {result['beats_per_bar'] or '?'} beats/bar, {len(result['beats_s'])} beats, "
+          f"{len(result['downbeats_s'])} downbeats")
+    if result["key"]:
+        alt = result["key_alternative"]
+        print(f"key: {result['key']} {result['mode']}  confidence {result['key_confidence']:.2f}"
+              f"  (relative: {alt['key']} {alt['mode']})")
+    else:
+        print("key: unknown")
+    if result["overrides"]:
+        print("overrides: " + ", ".join(f"{k}={v}" for k, v in result["overrides"].items()))
 
 
 if __name__ == "__main__":  # pragma: no cover

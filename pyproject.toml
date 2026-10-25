@@ -22,6 +22,10 @@ dependencies = [
   "numpy>=2,<3",
   "torch>=2.14,<2.15",
   "torchaudio>=2.11",
+  "beat-this>=1.1,<2",
+  "librosa>=0.11",
+  "soundfile>=0.13",
+  "scipy>=1.11",
 ]
 
 [project.scripts]

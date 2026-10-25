@@ -1,0 +1,233 @@
+"""Orchestrate tempo/beat/bar/key analysis and write <out>/analysis.json."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sys
+from importlib import metadata
+from pathlib import Path
+
+import numpy as np
+
+from grepchopflip import __version__
+from grepchopflip.beats import AudioReadError, analyze_beats, load_mono
+from grepchopflip.key import NOTES, estimate_key, parse_key, relative_key
+
+ANALYSIS_FILE = "analysis.json"
+DONE_FILE = "analysis_done.json"  # distinct from slice 2's stems/.done.json
+SCHEMA_VERSION = 1
+HARMONIC_STEMS = ("bass", "other", "vocals")
+ALL_STEMS = ("vocals", "drums", "bass", "other")
+_SOURCE_KEYS = ("path", "source_path", "file", "input", "audio", "original")
+_AUDIO_EXT = {".wav", ".flac", ".ogg", ".mp3", ".m4a", ".aiff", ".aif", ".opus", ".aac"}
+
+
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
+
+
+def sha256_path(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _slug(name: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").lower()
+    return s or "song"
+
+
+def _find_source_audio(out_dir: Path) -> Path | None:
+    sj = out_dir / "source.json"
+    if sj.is_file():
+        try:
+            data = json.loads(sj.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if isinstance(data, dict):
+            for k in _SOURCE_KEYS:
+                v = data.get(k)
+                if isinstance(v, str):
+                    p = Path(v)
+                    if not p.is_absolute():
+                        p = out_dir / p
+                    if p.is_file():
+                        return p
+    for p in sorted(out_dir.iterdir()):
+        if p.is_file() and p.stem.lower() in ("source", "mix", "original") and p.suffix.lower() in _AUDIO_EXT:
+            return p
+    return None
+
+
+def _stem_paths(out_dir: Path, names) -> dict[str, Path]:
+    d = out_dir / "stems"
+    return {n: d / f"{n}.wav" for n in names if (d / f"{n}.wav").is_file()}
+
+
+def _mix(paths: list[Path]) -> tuple[np.ndarray, int]:
+    sigs = []
+    sr = None
+    for p in paths:
+        y, s = load_mono(p)
+        if sr is None:
+            sr = s
+        elif s != sr:
+            import librosa
+
+            y = librosa.resample(y, orig_sr=s, target_sr=sr)
+        sigs.append(y)
+    n = min(len(s) for s in sigs)
+    return np.sum([s[:n] for s in sigs], axis=0).astype(np.float32), int(sr)
+
+
+def _loudness(y: np.ndarray) -> dict:
+    peak = float(np.max(np.abs(y))) if y.size else 0.0
+    rms = float(np.sqrt(np.mean(np.square(y)))) if y.size else 0.0
+
+    def db(x: float):
+        return round(20 * np.log10(x), 2) if x > 1e-9 else None
+
+    return {"rms_dbfs": db(rms), "peak_dbfs": db(peak)}
+
+
+def _resolve_inputs(audio_or_out: Path | str, out_dir: Path | str | None):
+    """Return (out_dir, mix_paths, key_stems, stems). mix_paths: files whose sum is the full mix."""
+    p = Path(audio_or_out)
+    if p.is_dir():
+        out = Path(out_dir) if out_dir else p
+        src = _find_source_audio(p)
+        stems = _stem_paths(p, ALL_STEMS)
+        if src is not None:
+            mix = [src]
+        elif len(stems) == len(ALL_STEMS):
+            mix = [stems[n] for n in ALL_STEMS]
+        else:
+            raise AudioReadError(
+                f"{p} has no source audio (source.json/source.*) and not all four stems (stems/*.wav)"
+            )
+        return out, mix, stems
+    if not p.is_file():
+        raise AudioReadError(f"Input not found: {p}")
+    out = Path(out_dir) if out_dir else Path("out") / _slug(p.stem)
+    return out, [p], _stem_paths(out, ALL_STEMS)
+
+
+def analyze(
+    audio_or_out: Path | str,
+    out_dir: Path | str | None = None,
+    bpm_override: float | None = None,
+    key_override: str | None = None,
+    force: bool = False,
+    device: str | None = None,
+) -> dict:
+    """Analyze a song (or an existing output folder) and write <out>/analysis.json.
+
+    Raises AudioReadError (input unreadable) or ModelDownloadError (checkpoint unavailable).
+    """
+    if bpm_override is not None and not bpm_override > 0:
+        raise ValueError("--bpm must be positive")
+    key_ov = parse_key(key_override) if key_override else None
+
+    out, mix_paths, stems = _resolve_inputs(audio_or_out, out_dir)
+    key_stem_paths = {n: p for n, p in stems.items() if n in HARMONIC_STEMS}
+    use_stems_for_key = set(key_stem_paths) == set(HARMONIC_STEMS)
+
+    beat_version = metadata.version("beat-this")
+    params = {
+        "bpm_override": bpm_override,
+        "key_override": list(key_ov) if key_ov else None,
+        "key_source": "stems" if use_stems_for_key else "mix",
+        "beat_this": beat_version,
+        "schema": SCHEMA_VERSION,
+    }
+    inputs = {str(p): sha256_path(p) for p in mix_paths}
+    if use_stems_for_key:
+        inputs.update({str(p): sha256_path(p) for p in key_stem_paths.values()})
+    input_key = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+    out.mkdir(parents=True, exist_ok=True)
+    result_path, done_path = out / ANALYSIS_FILE, out / DONE_FILE
+    if not force and result_path.is_file() and done_path.is_file():
+        try:
+            done = json.loads(done_path.read_text(encoding="utf-8"))
+            if done.get("input_key") == input_key and done.get("params") == params:
+                _log("analysis cached (use --force to recompute)")
+                return json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+
+    _log(f"Loading audio: {', '.join(p.name for p in mix_paths)}")
+    mix, sr = _mix(mix_paths)
+
+    _log("Tracking beats (beat_this)")
+    b = analyze_beats(mix, sr, device)
+
+    overrides: dict = {}
+    if bpm_override is not None:
+        overrides["bpm"] = bpm_override
+        b["bpm"] = float(bpm_override)
+        b["tempo_reliable"] = True  # the user vouches for the tempo
+        if bpm_override not in b["bpm_candidates"]:
+            b["bpm_candidates"] = sorted(b["bpm_candidates"] + [float(bpm_override)])
+
+    if key_ov:
+        overrides["key"] = f"{key_ov[0]} {key_ov[1]}"
+        alt = relative_key(*key_ov)
+        k = {"key": key_ov[0], "mode": key_ov[1], "key_confidence": 1.0,
+             "key_alternative": {"key": alt[0], "mode": alt[1]}}
+    else:
+        if use_stems_for_key:
+            _log("Estimating key from bass + other + vocals stems")
+            ky, ksr = _mix(list(key_stem_paths.values()))
+        else:
+            _log("Estimating key from the full mix")
+            ky, ksr = mix, sr
+        k = estimate_key(ky, ksr)
+
+    result = {
+        "schema_version": SCHEMA_VERSION,
+        "bpm": b["bpm"],
+        "bpm_confidence": b["bpm_confidence"],
+        "bpm_candidates": b["bpm_candidates"],
+        "bpm_raw": b["bpm_raw"],
+        "tempo_reliable": b["tempo_reliable"],
+        "beats_s": b["beats_s"],
+        "downbeats_s": b["downbeats_s"],
+        "beats_per_bar": b["beats_per_bar"],
+        "key": k["key"],
+        "mode": k["mode"],
+        "key_confidence": k["key_confidence"],
+        "key_alternative": k["key_alternative"],
+        "key_relative_margin": k.get("key_relative_margin"),
+        "key_source": "override" if key_ov else params["key_source"],
+        "overrides": overrides,
+        "models": {
+            "beat_tracker": {"name": "beat_this", "version": beat_version, "checkpoint": "final0",
+                             "license": "MIT"},
+            "key": {"method": "librosa CQT chroma (harmonic, tuned) + Krumhansl-Kessler templates"},
+        },
+        "input": {"files": [str(p) for p in mix_paths], "sample_rate": sr,
+                  "duration_s": round(len(mix) / sr, 3)},
+        "gcf_version": __version__,
+    }
+    if stems:
+        loud = {}
+        for n, p in stems.items():
+            y, _ = load_mono(p)
+            loud[n] = _loudness(y)
+        result["stem_loudness"] = loud
+
+    result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    done_path.write_text(
+        json.dumps({"input_key": input_key, "params": params, "inputs": inputs}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    _log(f"Wrote {result_path}")
+    return result
+
+
+__all__ = ["analyze", "AudioReadError", "NOTES"]
