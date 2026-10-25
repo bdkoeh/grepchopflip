@@ -67,6 +67,18 @@ wheels = [
 ]
 
 [[package]]
+name = "auditok"
+version = "0.5.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1f/ae/16ae19d11c94d163ee5542b1248254075f1f3748599644ca8460d7117bb8/auditok-0.5.2.tar.gz", hash = "sha256:4a2f654739e9f4cce8a92e3b1f9d08e8b6ca94643462cd2c835809ff8ea7955f", size = 137212, upload-time = "2026-07-28T18:16:36.381Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1e/e0/27756026786d587963b37c09b4b9f10059d3cd88c910a0de272a8129e3cb/auditok-0.5.2-py3-none-any.whl", hash = "sha256:ce86c5dff4b5c7e53e67f98500bba17caa3f353fd9ac60e9a636031db01cd45b", size = 83861, upload-time = "2026-07-28T18:16:39.014Z" },
+]
+
+[[package]]
 name = "beartype"
 version = "0.18.5"
 source = { registry = "https://pypi.org/simple" }
@@ -350,6 +362,7 @@ source = { editable = "." }
 dependencies = [
     { name = "audio-separator" },
     { name = "audioread" },
+    { name = "auditok" },
     { name = "beat-this" },
     { name = "librosa" },
     { name = "numpy" },
@@ -371,6 +384,7 @@ dev = [
 requires-dist = [
     { name = "audio-separator", specifier = ">=0.47,<0.48" },
     { name = "audioread", specifier = ">=3.1.0" },
+    { name = "auditok", specifier = ">=0.5.2" },
     { name = "beat-this", specifier = ">=1.1,<2" },
     { name = "librosa", specifier = ">=0.11" },
     { name = "numpy", specifier = ">=2,<3" },

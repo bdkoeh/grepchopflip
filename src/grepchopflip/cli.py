@@ -217,5 +217,66 @@ def analyze(
         print("overrides: " + ", ".join(f"{k}={v}" for k, v in result["overrides"].items()))
 
 
+from grepchopflip.chop.bass import chop_bass  # noqa: E402
+from grepchopflip.chop.melodic import chop_melodic  # noqa: E402
+from grepchopflip.chop.vocals import chop_vocals  # noqa: E402
+
+# stem -> chopper(out_dir, sensitivity=, force=) -> summary dict. Merge with the drums entry from slice 4.
+CHOPPERS = {"bass": chop_bass, "other": chop_melodic, "vocals": chop_vocals}
+
+
+@app.command()
+def chop(
+    out_dir: Path = typer.Argument(..., help="Output folder of `gcf separate` + `gcf analyze`."),
+    stems: Optional[str] = typer.Option(
+        None, "--stems", help="Comma-separated stems to chop (default: all available choppers)."),
+    sensitivity: float = typer.Option(0.5, "--sensitivity", help="Onset sensitivity 0..1 (higher = more slices)."),
+    force: bool = typer.Option(False, "--force", help="Ignore earlier results and rebuild."),
+    as_json: bool = typer.Option(False, "--json", help="Print a JSON summary on stdout."),
+) -> None:
+    """Cut stems into one-shots, loops and phrases (WAV files plus chops.json)."""
+    import contextlib
+    import logging
+
+    from rich.logging import RichHandler
+
+    from grepchopflip.errors import InputError
+
+    names = [s.strip() for s in stems.split(",") if s.strip()] if stems else list(CHOPPERS)
+    bad = [s for s in names if s not in CHOPPERS]
+    if bad or not names:
+        err.print(f"[red]![/] unknown stem(s) {bad or stems!r}; choose from {', '.join(CHOPPERS)}")
+        raise typer.Exit(EXIT_USAGE)
+    if not 0.0 <= sensitivity <= 1.0:
+        err.print("[red]![/] --sensitivity must be between 0 and 1")
+        raise typer.Exit(EXIT_USAGE)
+    if not (out_dir / "stems").is_dir() or not (out_dir / "analysis.json").is_file():
+        err.print(f"[red]![/] {out_dir} lacks stems/ or analysis.json; run `gcf separate` and `gcf analyze` first")
+        raise typer.Exit(EXIT_INPUT)
+
+    handler = RichHandler(console=err, show_path=False, show_time=False, markup=False)
+    pkg_log = logging.getLogger("grepchopflip")
+    pkg_log.addHandler(handler)
+    pkg_log.setLevel(logging.INFO)
+    results: dict[str, dict] = {}
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            for name in names:
+                results[name] = CHOPPERS[name](out_dir, sensitivity=sensitivity, force=force)
+    except InputError as e:
+        err.print(f"[red]![/] {e}")
+        raise typer.Exit(EXIT_INPUT)
+    finally:
+        pkg_log.removeHandler(handler)
+
+    summary = {"out_dir": str(out_dir), "stems": results}
+    if as_json:
+        print(json.dumps(summary, indent=2))
+    else:
+        for name, r in results.items():
+            counts = ", ".join(f"{k} {v}" for k, v in r["counts"].items()) or "nothing"
+            print(f"{name}: {counts}{' (cached)' if r['cached'] else ''}  -> {r['chops_json']}")
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()

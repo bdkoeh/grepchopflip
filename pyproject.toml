@@ -32,6 +32,7 @@ dependencies = [
   "beat-this>=1.1,<2",
   "librosa>=0.11",
   "scipy>=1.11",
+  "auditok>=0.5.2",
 ]
 
 [project.scripts]
