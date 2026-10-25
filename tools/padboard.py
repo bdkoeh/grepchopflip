@@ -49,8 +49,11 @@ const mode = document.getElementById('mode');
 let ctx = null, cur = null, curIdx = -1;           // Web Audio state
 const buffers = new Map();
 const served = location.protocol.startsWith('http');
-mode.textContent = served ? 'served: gapless loops' : 'file: element loop (may gap); use --serve for gapless';
+mode.textContent = (served ? 'served: gapless loops' : 'file: element loop (may gap); use --serve for gapless') + ' · files re-fetched on every page load';
 
+// the <audio> elements get a version stamp per page load so a plain reload also fetches fresh files
+const stamp = Date.now();
+document.querySelectorAll('audio').forEach(a => a.setAttribute('src', a.getAttribute('src') + '?v=' + stamp));
 function stopAll() {{
   document.querySelectorAll('audio').forEach(x => {{ x.pause(); x.currentTime = 0; x.loop = false; }});
   if (cur) {{ try {{ cur.stop(); }} catch (e) {{}} cur = null; }}
@@ -60,7 +63,8 @@ function stopAll() {{
 async function playWebAudio(i, src) {{
   ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
   if (!buffers.has(src)) {{
-    const data = await (await fetch(src)).arrayBuffer();
+    // never trust a cached WAV: the files are rewritten in place by `gcf chop`
+    const data = await (await fetch(src + '?v=' + Date.now(), {{cache: 'no-store'}})).arrayBuffer();
     buffers.set(src, await ctx.decodeAudioData(data));
   }}
   const s = ctx.createBufferSource();
@@ -73,7 +77,7 @@ function play(i) {{
   stopAll();
   if (again) return;                                  // clicking the looping pad stops it
   if (loopBox.checked) {{
-    if (served) {{ playWebAudio(i, a.getAttribute('src')).catch(() => {{ a.loop = true; a.play(); curIdx = i; pads[i].classList.add('looping'); }}); }}
+    if (served) {{ playWebAudio(i, a.getAttribute('src').split('?')[0]).catch(() => {{ a.loop = true; a.play(); curIdx = i; pads[i].classList.add('looping'); }}); }}
     else {{ a.loop = true; a.currentTime = 0; a.play(); curIdx = i; pads[i].classList.add('looping'); }}
     return;
   }}
