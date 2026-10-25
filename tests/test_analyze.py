@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from grepchopflip.beats import beat_stats, is_tempo_reliable, resolve_tempo
+from grepchopflip.beats import beat_regularity, beat_stats, is_tempo_reliable, resolve_tempo
 from grepchopflip.key import estimate_key, parse_key, relative_key
 from grepchopflip.models import (
     BEAT_THIS_SHA256,
@@ -392,11 +392,89 @@ def test_regularity_survives_breakdown_but_not_drift():
     gapped = np.concatenate([steady[:30], steady[30:] + 25 * p])
     assert beat_regularity(gapped) > 0.95
     assert is_tempo_reliable(beat_regularity(gapped), len(gapped))
-    # tempo ramp 90 -> 96 BPM over the track
-    bpm = np.linspace(90, 96, 60)
+    # real tempo ramp 90 -> 110 BPM over the track (halves differ by ~11%)
+    bpm = np.linspace(90, 110, 60)
     drift = np.concatenate([[0], np.cumsum(60 / bpm[:-1])])
-    assert beat_regularity(drift) < 0.5
+    assert beat_regularity(drift) < 0.6  # below the reliability threshold
     assert beat_regularity(steady) > beat_regularity(drift)
+    # a mild 90 -> 96 ramp (< 4% between halves) is not penalized any more (real-track finding)
+    mild = np.concatenate([[0], np.cumsum(60 / np.linspace(90, 96, 60)[:-1])])
+    assert beat_regularity(mild) > 0.9
+
+
+def test_quantization_level_half_differences_do_not_lower_confidence():
+    # 20 ms-quantized beats whose half medians differ by 3% (0.66 vs 0.64) but whose fitted tempo is the same
+    iv = np.array([0.66] * 35 + [0.64] * 35 + [0.62, 0.68] * 2)
+    beats = np.concatenate([[0], np.cumsum(iv)])
+    assert beat_regularity(beats) >= 0.9
+
+
+def test_large_multiple_share_is_not_a_harmless_gap():
+    from grepchopflip.beats import grid_consistency
+
+    iv = np.array([0.38] * 20 + [0.76] * 20)  # alternating time feels, 50% whole multiples
+    beats = np.concatenate([[0], np.cumsum(iv)])
+    assert beat_regularity(beats) <= 0.55
+    assert grid_consistency(beats) <= 0.55
+
+
+# ---------------------------------------------------------------- real-track beat lists (no audio)
+
+def _real(name):
+    from pathlib import Path
+
+    d = json.loads((Path(__file__).parent / "fixtures" / "real_beats" / f"{name}.json").read_text())
+    return np.array(d["beats_s"]), np.array(d["downbeats_s"]), d["duration_s"]
+
+
+def test_real_black_cow_quantization_is_not_drift():
+    from grepchopflip.beats import build_beat_result
+
+    r = build_beat_result(*_real("Black_Cow_Steely_Dan"))
+    assert r["bpm"] == pytest.approx(92.3, abs=0.5)
+    assert r["bpm_confidence"] >= 0.9 and r["tempo_reliable"] is True
+    assert r["grid_source"] == "tracked" and r["beats_per_bar"] == 4
+
+
+def test_real_huit_octobre_mixed_time_is_normalized():
+    from grepchopflip.beats import build_beat_result
+
+    b, d, dur = _real("Huit_octobre_1971")
+    r = build_beat_result(b, d, dur)
+    assert r["bpm"] == pytest.approx(79.0, abs=1.0)
+    assert r["beats_per_bar"] == 4
+    assert r["grid_source"] == "normalized_half"
+    assert r["bpm_candidates"] == pytest.approx([78.947, 157.895], abs=0.5)
+    assert r["tempo_reliable"] is True
+    assert r["grid_consistency"] < 0.6 and "mixed double and normal time" in r["bpm_rule"]
+    # the reported grid is one tempo and matches the reported BPM
+    g = np.array(r["beats_s"])
+    assert 60 / np.median(np.diff(g)) == pytest.approx(r["bpm"], abs=1.0)
+    assert len(g) < len(b)
+
+
+def test_real_sade_is_unchanged():
+    from grepchopflip.beats import build_beat_result
+
+    b, d, dur = _real("Sade_Kiss_Of_Life_1993")
+    r = build_beat_result(b, d, dur)
+    assert r["bpm"] == pytest.approx(97.0, abs=0.5)
+    assert r["grid_source"] == "tracked" and r["beats_per_bar"] == 4
+    assert r["tempo_reliable"] is True and len(r["beats_s"]) == len(b)
+
+
+def test_synthetic_double_time_mix_is_normalized():
+    from grepchopflip.beats import build_beat_result
+
+    p = 60 / 80.0
+    fast = np.arange(0, 40) * (p / 2)  # 10 bars of 4 beats at 160 BPM
+    slow = fast[-1] + p / 2 + np.arange(0, 20) * p  # then 80 BPM
+    beats = np.concatenate([fast, slow])
+    downs = np.concatenate([fast[::4], slow[::2]])
+    r = build_beat_result(beats, downs, 60.0)
+    assert r["grid_source"] == "normalized_half"
+    assert r["bpm"] == pytest.approx(80.0, abs=1.0)
+    assert r["tempo_reliable"] is True
 
 
 def test_bpm_from_frame_quantized_beats():

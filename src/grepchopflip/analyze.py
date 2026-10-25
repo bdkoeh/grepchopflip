@@ -128,7 +128,9 @@ def _constants() -> dict:
         "preferred": [beats_mod.PREFERRED_MIN, beats_mod.PREFERRED_MAX],
         "min_beats": beats_mod.MIN_BEATS,
         "min_confidence": beats_mod.MIN_CONFIDENCE,
-        "interval_tol": [beats_mod.INTERVAL_TOL, beats_mod.INTERVAL_TOL_MIN_S, beats_mod.DRIFT_FULL_PENALTY],
+        "interval_tol": [beats_mod.INTERVAL_TOL, beats_mod.INTERVAL_TOL_MIN_S, beats_mod.DRIFT_FULL_PENALTY,
+                         beats_mod.DRIFT_START, beats_mod.DRIFT_SHARE_GATE, beats_mod.GAP_MAX_SHARE],
+        "normalization": "double-time-mix-v1",
         "key_thresholds": [key_mod.KEY_MIN_CORRELATION, key_mod.KEY_MIN_CONFIDENCE],
     }
 
@@ -212,6 +214,8 @@ def analyze(
         "bpm_raw": b["bpm_raw"],
         "tempo_reliable": b["tempo_reliable"],
         "grid_source": b["grid_source"],
+        "bpm_rule": b["bpm_rule"],
+        "grid_consistency": b["grid_consistency"],
         "beats_s": b["beats_s"],
         "downbeats_s": b["downbeats_s"],
         "beats_per_bar": b["beats_per_bar"],
