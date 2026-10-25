@@ -46,7 +46,7 @@ def counts(index: dict | None) -> dict:
             "folder": dict(sorted(by_folder.items()))}
 
 
-def build(*, input_path: str, out_dir: Path | None, stages: dict[str, dict], warnings: list[str],
+def build(*, input_path: str | None, out_dir: Path | None, stages: dict[str, dict], warnings: list[str],
           errors: list[dict], exit_code: int, status: str, total_s: float, config: dict | None = None,
           index: dict | None = None) -> dict:
     rows = (index or {}).get("samples") or []
@@ -71,6 +71,13 @@ def build(*, input_path: str, out_dir: Path | None, stages: dict[str, dict], war
         "errors": errors,
         "config": config or {},
     }
+
+
+def failure(input_path: str | None, stage: str, msg: str, code: int, out_dir: Path | None = None,
+            stages: dict | None = None, warnings: list[str] | None = None, total_s: float = 0.0) -> dict:
+    """The summary for a run that stopped before (or outside) the stages: usage, input, config, interrupt."""
+    return build(input_path=input_path, out_dir=out_dir, stages=stages or {}, warnings=warnings or [],
+                 errors=[{"stage": stage, "error": msg}], exit_code=code, status="failed", total_s=total_s)
 
 
 def to_json(summary: dict, index: dict | None = None, full: bool = False) -> str:

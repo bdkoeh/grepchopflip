@@ -315,6 +315,47 @@ def test_slice2_style_folder_uses_stems_for_key_and_caches(tmp_path, monkeypatch
     assert {"gcf_version", "librosa", "checkpoint_sha256", "constants"} <= set(done2["params"])
 
 
+def test_cache_keys_are_relative_to_the_song_folder(tmp_path, monkeypatch):
+    """`gcf analyze out/x`, `/abs/out/x`, `gcf run` and a moved/copied folder all hit the same cache."""
+    import shutil
+
+    from grepchopflip.analyze import analyze
+
+    b, d_ = _grid(100.0, 20)
+    _stub_tracker(monkeypatch, b, d_)
+    folder, n, sr = _slice2_folder(tmp_path)
+    r1 = analyze(folder)
+    done = json.loads((folder / "analysis_done.json").read_text())
+    assert "stems/drums.wav" in done["inputs"] and str(tmp_path / "orig.wav") in done["inputs"]
+    stat = (folder / "analysis_done.json").stat().st_mtime_ns
+
+    monkeypatch.chdir(tmp_path)
+    assert analyze("song_out") == r1                                  # relative path string
+    assert analyze(tmp_path / "orig.wav", folder) == r1               # song file + folder (what `gcf run` does)
+    assert (folder / "analysis_done.json").stat().st_mtime_ns == stat  # no recompute
+    moved = tmp_path / "elsewhere" / "song_out"
+    shutil.copytree(folder, moved)
+    t = (moved / "analysis_done.json").stat().st_mtime_ns
+    assert analyze(moved) == r1                                        # result identical, cache hit
+    assert (moved / "analysis_done.json").stat().st_mtime_ns == t
+
+
+def test_cache_state_is_read_only_and_matches_analyze(tmp_path, monkeypatch):
+    from grepchopflip.analyze import analyze, cache_state
+
+    b, d_ = _grid(100.0, 20)
+    _stub_tracker(monkeypatch, b, d_)
+    folder, n, sr = _slice2_folder(tmp_path)
+    before = sorted(p.name for p in folder.iterdir())
+    assert cache_state(folder) == {"cached": False, "reason": "not analyzed yet"}
+    assert sorted(p.name for p in folder.iterdir()) == before          # wrote nothing
+    analyze(folder)
+    assert cache_state(folder)["cached"] is True
+    assert cache_state(folder, bpm_override=90.0)["cached"] is False   # settings are part of the decision
+    sf.write(folder / "stems" / "drums.wav", np.zeros(n, dtype=np.float32), sr)
+    assert cache_state(folder) == {"cached": False, "reason": "inputs or settings changed"}
+
+
 def test_slice2_folder_without_source_falls_back_to_stem_mix(tmp_path, monkeypatch):
     from grepchopflip.analyze import analyze
 

@@ -9,8 +9,23 @@ from pathlib import Path
 APP_NAME = "gcf"
 
 
+_cache_dir_override: Path | None = None
+
+
+def set_cache_dir_override(path: str | Path | None) -> Path | None:
+    """Process-level cache folder chosen by `--cache-dir` or a config file (checked before GCF_CACHE_DIR).
+    Returns the previous override so callers can restore it. The environment is never modified."""
+    global _cache_dir_override
+    prev = _cache_dir_override
+    _cache_dir_override = Path(path).expanduser() if path else None
+    return prev
+
+
 def cache_dir() -> Path:
-    """Per-user cache for downloaded models. Honors GCF_CACHE_DIR, then XDG_CACHE_HOME."""
+    """Per-user cache for downloaded models: the process override (`--cache-dir` / config), then GCF_CACHE_DIR,
+    then XDG_CACHE_HOME."""
+    if _cache_dir_override is not None:
+        return _cache_dir_override
     env = os.environ.get("GCF_CACHE_DIR")
     if env:
         return Path(env).expanduser()
@@ -47,7 +62,7 @@ def library_dir(override: str | Path | None = None) -> Path:
 PROJECT_FILE = "gcf.toml"
 RESERVED_TABLES = ("settings",)
 PROGRESS_MODES = ("auto", "bar", "lines", "none")
-EXTRA_NAMES = ("words", "notes")
+from grepchopflip.chop.registry import EXTRA_NAMES  # noqa: E402  (the one list, shared with `gcf chop`)
 
 #: key -> (type, environment variable)
 RUN_KEYS: dict[str, tuple[str, str]] = {

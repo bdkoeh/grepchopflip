@@ -97,8 +97,52 @@ def test_bad_config_exit_2(song, tmp_path):
 
 
 def test_usage_errors_exit_2(song, tmp_path):
-    assert gcf(["--json", "info"], tmp_path).returncode == 2       # --json belongs after other commands
     assert gcf(["run"], tmp_path).returncode == 2
+    for flag in (["--quiet"], ["--plain"], ["--progress", "lines"], ["--dry-run"]):
+        r = gcf([*flag, "info"], tmp_path)                          # run-only flags before another command
+        assert r.returncode == 2 and "only apply to `gcf run`" in r.stderr, flag
+
+
+@pytest.mark.parametrize("args", [["run", "SONG", "--sensitivity", "abc", "--json"], ["run", "--json"],
+                                  ["run", "SONG", "--json=full", "--bogus"], ["--json", "info"]])
+def test_usage_errors_with_json_give_json(song, tmp_path, args):
+    r = gcf([str(song) if a == "SONG" else a for a in args], tmp_path)
+    assert r.returncode == 2, r.stderr
+    doc = json.loads(r.stdout)
+    assert doc["status"] == "failed" and doc["exit_code"] == 2 and doc["errors"][0]["stage"] == "usage"
+
+
+def test_unreadable_song_is_exit_3_with_json(song, tmp_path):
+    song.chmod(0)
+    try:
+        r = gcf(["run", str(song), "--json"], tmp_path)
+    finally:
+        song.chmod(0o644)
+    assert r.returncode == 3, r.stderr
+    assert json.loads(r.stdout)["errors"][0]["stage"] == "input"
+
+
+def test_dry_run_with_unreadable_source_is_exit_3_with_json(song, tmp_path):
+    """Review case: source.json points at a file that exists but cannot be read."""
+    folder = tmp_path / "songdir"
+    folder.mkdir()
+    (folder / "source.json").write_text(json.dumps({"path": str(song)}))
+    song.chmod(0)
+    try:
+        r = gcf(["run", str(folder), "--dry-run", "--json"], tmp_path, fake=False)
+    finally:
+        song.chmod(0o644)
+    assert r.returncode == 3, r.stderr
+    assert json.loads(r.stdout)["status"] == "failed"
+    assert "Traceback" not in r.stderr
+
+
+def test_help_texts(tmp_path):
+    wide = {"COLUMNS": "200"}
+    top = gcf(["--help"], tmp_path, env=wide, fake=False).stdout
+    assert "(run only)" in top and "[run]" not in top
+    run_help = gcf(["run", "--help"], tmp_path, env=wide, fake=False).stdout
+    assert "[default: 0]" not in run_help and "No colors or progress bars on stderr" in run_help
 
 
 def test_dry_run_changes_nothing(song, tmp_path):

@@ -35,6 +35,11 @@ def make(name: str, exc_factory=None):
             from grepchopflip.errors import SeparationError
 
             raise (exc_factory() if exc_factory else SeparationError(f"{name}: induced failure"))
+        if name == "analyze" and ctx.audio is None and not Path(ctx.out_dir).is_dir():
+            # like the real analyze: it needs the song file or an existing song folder to read
+            from grepchopflip.beats import AudioReadError
+
+            raise AudioReadError(f"{ctx.out_dir} has no source audio and no stems")
         m = _marker(ctx, name)
         cached = m.is_file() and not ctx.force
         m.parent.mkdir(parents=True, exist_ok=True)

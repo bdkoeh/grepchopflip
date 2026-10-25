@@ -42,7 +42,6 @@ DEPS: dict[str, tuple[str, ...]] = {
     "separate": (), "analyze": (), "chop": ("separate", "analyze"), "organize": ("chop",), "enrich": ("organize",),
 }
 OK_STATUSES = ("done", "cached", "partial")
-CHOP_STEMS = ("drums", "bass", "other", "vocals")
 HEARTBEAT_S = 5.0          # progress line interval during a long stage (lines mode)
 
 
@@ -71,6 +70,10 @@ class StageSkipped(Exception):
     """Raised by a stage that does not apply (reported as `skipped` with the message as reason)."""
 
 
+class _StageProblem(Exception):
+    """A stage reported problems without an exception of its own (maps to exit 6 when nothing was produced)."""
+
+
 StageFn = Callable[[RunContext], dict]
 
 
@@ -93,6 +96,8 @@ def resolve_input(path: Path, library: Path | str | None = None, out: Path | Non
         return folder.resolve(), audio
     if not p.is_file():
         raise InputError(f"input not found: {p}")
+    if not os.access(p, os.R_OK):
+        raise InputError(f"cannot read {p}: permission denied")
     if out:
         return Path(out).expanduser().resolve(), p.resolve()
     return (library_dir(library) / song_slug(p, sha256_file(p))).resolve(), p.resolve()
@@ -130,12 +135,19 @@ def recorded_settings(folder: Path) -> dict:
         out["fast"] = done.get("params", {}).get("pass1_model") == MODEL_FAST
     except (OSError, ValueError, AttributeError):
         pass
-    try:
-        prm = json.loads((folder / "chops" / "drums" / ".done.json").read_text(encoding="utf-8")).get("params", {})
-        if isinstance(prm.get("sensitivity"), (int, float)):
-            out["sensitivity"] = float(prm["sensitivity"])
-    except (OSError, ValueError, AttributeError):
-        pass
+    # sensitivity: adopted only when every chopped stem recorded the same value
+    sens: set[float] = set()
+    records = [folder / "chops" / "drums" / ".done.json",
+               *(folder / "chops" / sub / "chops.json" for sub in ("bass", "melodic", "vocals"))]
+    for rec in records:
+        try:
+            prm = json.loads(rec.read_text(encoding="utf-8")).get("params", {})
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(prm, dict) and isinstance(prm.get("sensitivity"), (int, float)):
+            sens.add(float(prm["sensitivity"]))
+    if len(sens) == 1:
+        out["sensitivity"] = sens.pop()
     try:
         bd = json.loads((folder / ".organize.json").read_text(encoding="utf-8")).get("bit_depth")
         if bd in (16, 24):
@@ -170,9 +182,11 @@ def stage_separate(ctx: RunContext) -> dict:
     from grepchopflip.errors import InputError
 
     if ctx.audio is None:
-        if _all_stems(ctx.out_dir) and not ctx.force:
-            ctx.warnings.append("separate: source audio not found; keeping the existing stems")
-            return {"cached": True, "note": "source audio missing; existing stems kept"}
+        if _all_stems(ctx.out_dir):
+            why = ("--force cannot redo separation: the source audio is gone" if ctx.force
+                   else "source audio not found")
+            ctx.warnings.append(f"separate: {why}; keeping the existing stems")
+            return {"cached": True, "note": f"{why}; existing stems kept"}
         raise InputError(f"source audio for {ctx.out_dir} not found (source.json path); cannot separate")
     r = sep.separate(ctx.audio, ctx.out_dir, fast=ctx.fast, device=ctx.device, force=ctx.force)
     return {"cached": bool(r["cached"]), "recorded_seconds": r.get("seconds") or {}}
@@ -191,26 +205,12 @@ def stage_analyze(ctx: RunContext) -> dict:
 
     done = ctx.out_dir / DONE_FILE
     before = _stat(done)
-    r = analyze(ctx.out_dir, force=ctx.force)
+    # with the song file at hand, analyze reads it directly: this works even when separation failed and the
+    # song folder does not exist yet (analyze then uses the full mix for the key)
+    r = analyze(ctx.audio, ctx.out_dir, force=ctx.force) if ctx.audio is not None else analyze(ctx.out_dir, force=ctx.force)
     # analyze has no `cached` flag; its done file is rewritten (atomic replace) only when it recomputed
     cached = before is not None and _stat(done) == before
     return {"cached": cached, "bpm": r.get("bpm"), "key": r.get("key"), "mode": r.get("mode")}
-
-
-def _chopper(name: str):
-    if name == "drums":
-        from grepchopflip.chop.drums import chop_drums as f
-    elif name == "bass":
-        from grepchopflip.chop.bass import chop_bass as f
-    elif name == "other":
-        from grepchopflip.chop.melodic import chop_melodic as f
-    elif name == "vocals":
-        from grepchopflip.chop.vocals import chop_vocals as f
-    elif name == "words":
-        from grepchopflip.chop.words_whisper import chop_words as f
-    else:
-        from grepchopflip.chop.notes_muscriptor import chop_notes as f
-    return f
 
 
 def _chop_total(r: dict) -> int | None:
@@ -224,6 +224,7 @@ def _chop_total(r: dict) -> int | None:
 def stage_chop(ctx: RunContext) -> dict:
     """Every stem whose file exists (drums first: it writes chops/grid.json the other loops reuse), then extras.
     One stem failing does not stop the others; the stage is `partial` then."""
+    from grepchopflip.chop.registry import CHOP_STEMS, chopper
     from grepchopflip.errors import InputError
 
     wanted = [s for s in CHOP_STEMS if (ctx.out_dir / "stems" / f"{s}.wav").is_file()]
@@ -233,7 +234,7 @@ def stage_chop(ctx: RunContext) -> dict:
     errors: dict[str, str] = {}
     exceptions: list[BaseException] = []
     for name in [*wanted, *(f"extra:{e}" for e in ctx.extras)]:
-        fn = _chopper(name.split(":")[-1])
+        fn = chopper(name.split(":")[-1])
         try:
             r = fn(ctx.out_dir, sensitivity=ctx.sensitivity, force=ctx.force)
             results[name] = r
@@ -275,30 +276,47 @@ def enrich_available() -> bool:
         return False
 
 
-def stage_enrich(ctx: RunContext) -> dict:
+ENRICH_CONTRACT = ("enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, "
+                   "embed: bool | None = None) -> dict")
+
+
+def _missing_extra(e: BaseException) -> bool:
+    """A missing third-party module (an extra not installed), not a broken import inside gcf itself."""
     from grepchopflip.errors import MissingDependencyError
 
+    if isinstance(e, MissingDependencyError):
+        return True
+    name = getattr(e, "name", None) or ""
+    return isinstance(e, ModuleNotFoundError) and not (name == "grepchopflip" or name.startswith("grepchopflip."))
+
+
+def stage_enrich(ctx: RunContext) -> dict:
+    """Slice 7 contract: `grepchopflip.enrich.enrich(song_dir, *, force, tag, embed) -> dict` (ENRICH_CONTRACT)."""
     if not enrich_available():
         raise StageSkipped("enrich is not part of this gcf install")
     try:
         import grepchopflip.enrich as mod  # type: ignore[import-not-found]
-    except (MissingDependencyError, ModuleNotFoundError) as e:
-        raise StageSkipped(f"enrich extras missing: {e}") from e
+    except Exception as e:
+        if _missing_extra(e):
+            raise StageSkipped(f"enrich extras missing: {e}") from e
+        raise
 
     fn = getattr(mod, "enrich", None)
     if not callable(fn):
-        raise StageSkipped("grepchopflip.enrich has no enrich() function")
-    wanted = {"force": ctx.force, "tag": ctx.tag, "embed": ctx.embed, "device": ctx.device}
+        raise _StageProblem(f"grepchopflip.enrich has no enrich() function; expected {ENRICH_CONTRACT}")
+    kwargs = {"force": ctx.force, "tag": ctx.tag, "embed": ctx.embed}
     try:
-        params = inspect.signature(fn).parameters
-        takes_any = any(p.kind is p.VAR_KEYWORD for p in params.values())
-        kwargs = {k: v for k, v in wanted.items() if v is not None and (takes_any or k in params)}
-    except (TypeError, ValueError):
-        kwargs = {}
+        inspect.signature(fn).bind(ctx.out_dir, **kwargs)
+    except TypeError as e:
+        raise _StageProblem(f"enrich() does not match the run contract ({e}); expected {ENRICH_CONTRACT}") from e
+    except ValueError:  # no signature available (builtin); just call it
+        pass
     try:
         r = fn(ctx.out_dir, **kwargs)
-    except (MissingDependencyError, ModuleNotFoundError) as e:
-        raise StageSkipped(f"enrich extras missing: {e}") from e
+    except Exception as e:
+        if _missing_extra(e):
+            raise StageSkipped(f"enrich extras missing: {e}") from e
+        raise
     r = r if isinstance(r, dict) else {}
     return {"cached": bool(r.get("cached")), **{k: v for k, v in r.items() if k in ("samples", "representatives")}}
 
@@ -477,7 +495,7 @@ def run_stages(ctx: RunContext, stages: dict[str, StageFn] | None = None, progre
                 entry["error"] = "; ".join(f"{k}: {v}" for k, v in r["errors"].items())
                 errors.append({"stage": name, "error": entry["error"]})
                 if first is None:
-                    first = exc_list[0] if exc_list else RuntimeError(entry["error"])
+                    first = exc_list[0] if exc_list else _StageProblem(entry["error"])
             elif r.get("cached"):
                 entry["status"] = "cached"
             entry["details"] = {k: v for k, v in r.items() if k not in ("cached", "errors", "produced")}
@@ -522,12 +540,13 @@ def status_of(result: RunResult, code: int) -> str:
 
 
 def finish(ctx: RunContext, result: RunResult) -> tuple[int, dict | None]:
-    """(exit code, index doc) after the stages ran."""
+    """(exit code, index doc) after the stages ran. The index is None unless organize finished in this run
+    (done, cached or partial): a stale index from an earlier run is never reported as this run's result."""
     from grepchopflip.summary import read_index
 
-    index = read_index(ctx.out_dir)
     org = result.stages.get("organize", {}).get("status")
-    samples = len(index["samples"]) if index and org in OK_STATUSES else 0
+    index = read_index(ctx.out_dir) if org in OK_STATUSES else None
+    samples = len(index["samples"]) if index else 0
     status = {k: v["status"] for k, v in result.stages.items()}
     return exitcodes.overall(status, result.first_error, samples), index
 
@@ -536,10 +555,13 @@ def finish(ctx: RunContext, result: RunResult) -> tuple[int, dict | None]:
 
 
 def plan(ctx: RunContext, stages: tuple[str, ...] = STAGE_ORDER, onsets: bool = True) -> dict:
-    """Stages to run or skip (from each stage's done records; an estimate, the stages decide for real) and an
-    estimated sample count from a fast onset pass. Writes nothing."""
+    """Stages to run or skip and an estimated sample count from a fast onset pass. Writes nothing.
+
+    separate and analyze use their stages' real cache checks; chop and organize read their done records.
+    A separate rerun makes everything after it run; an analyze rerun does not (chop stays cached when the new
+    analysis is identical, which is the usual case); a chop rerun makes organize run."""
     from grepchopflip import cache
-    from grepchopflip.analyze import ANALYSIS_FILE, DONE_FILE, sha256_path
+    from grepchopflip.analyze import cache_state, sha256_path
 
     folder = ctx.out_dir
     out: dict[str, dict] = {}
@@ -562,27 +584,32 @@ def plan(ctx: RunContext, stages: tuple[str, ...] = STAGE_ORDER, onsets: bool = 
                 done = cache.is_done(folder / "stems", sha256_path(ctx.audio), sep._params(ctx.fast), _stem_files(folder))
                 put(name, not done, "stems cached" if done else "no matching stems/.done.json")
         elif name == "analyze":
-            rec = None
-            try:
-                rec = json.loads((folder / DONE_FILE).read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                pass
-            ok = (rec is not None and (folder / ANALYSIS_FILE).is_file()
-                  and all(Path(p).is_file() and sha256_path(Path(p)) == h for p, h in (rec.get("inputs") or {}).items())
-                  and not out["separate"]["action"] == "run")
-            put(name, not ok, "analysis cached" if ok else "inputs changed or not analyzed yet")
+            if upstream_runs:
+                put(name, True, "after separation")
+            else:
+                try:
+                    st = cache_state(ctx.audio if ctx.audio is not None else folder, folder)
+                    put(name, not st["cached"], st["reason"])
+                except Exception as e:  # e.g. no input yet; analyze will report it for real
+                    put(name, True, f"cannot check: {type(e).__name__}: {e}")
         elif name == "chop":
-            ok = not upstream_runs and _chops_look_done(folder)
-            put(name, not ok, "chops cached" if ok else "not chopped yet, or upstream reruns")
+            if upstream_runs:
+                put(name, True, "after separation")
+            else:
+                ok = _chops_look_done(folder)
+                put(name, not ok, "chops cached (if the analysis is unchanged)" if ok else "not chopped yet")
         elif name == "organize":
-            ok = not upstream_runs and _organize_looks_done(folder)
-            put(name, not ok, "index up to date" if ok else "not organized yet, or upstream reruns")
+            if upstream_runs:
+                put(name, True, "after chop")
+            else:
+                ok = _organize_looks_done(folder)
+                put(name, not ok, "index up to date" if ok else "not organized yet")
         elif name == "enrich":
             if enrich_available():
                 put(name, True, "enrich decides what is cached")
             else:
                 out[name] = {"action": "skip", "reason": "enrich is not part of this gcf install"}
-        if out[name]["action"] == "run" and name != "enrich":
+        if out[name]["action"] == "run" and name in ("separate", "chop"):
             upstream_runs = True
     doc = {"dry_run": True, "input": str(ctx.input_path), "out_dir": str(folder), "stages": out,
            "estimate": estimate_samples(ctx) if onsets else None}
@@ -706,43 +733,66 @@ def _say(msg: str, quiet: bool = False) -> None:
 
 def run_from_cli(a: dict, stages: dict[str, StageFn] | None = None) -> int:
     """Everything `gcf run` does after argument parsing. `a` holds the parsed options (None = not given).
-    Prints the result on stdout and returns the exit code."""
+    Prints the result on stdout and returns the exit code. With --json, stdout is a JSON document on every
+    path: usage/config (2), input (3), unexpected errors and Ctrl-C (130) included."""
+    import traceback
+
     from grepchopflip import config as cfg
     from grepchopflip import summary as sm
     from grepchopflip.errors import InputError
 
-    t0 = time.perf_counter()
-    as_json, full = bool(a.get("json")), bool(a.get("json_full"))
-    as_json = as_json or full
+    st = {"t0": time.perf_counter(), "json": bool(a.get("json")) or bool(a.get("json_full")),
+          "song": str(a.get("song")), "warnings": [], "out_dir": None}
+
+    def emit_failure(code: int, stage: str, msg: str) -> int:
+        print(f"error: {msg}", file=sys.stderr, flush=True)
+        if st["json"]:
+            print(sm.to_json(sm.failure(st["song"], stage, msg, code, out_dir=st["out_dir"],
+                                        warnings=st["warnings"], total_s=time.perf_counter() - st["t0"])),
+                  flush=True)
+        return code
+
+    prev_cache = cfg._cache_dir_override
+    try:
+        return _run(a, stages, st, emit_failure)
+    except cfg.ConfigError as e:
+        return emit_failure(exitcodes.USAGE, "config", str(e))
+    except (InputError, PermissionError) as e:
+        return emit_failure(exitcodes.INPUT, "input", str(e))
+    except KeyboardInterrupt:
+        return emit_failure(130, "interrupted", "interrupted (Ctrl-C); finished stages are kept, rerun to continue")
+    except Exception as e:  # never a bare traceback on stdout's watch: report, map to a contract exit code
+        if a.get("verbose"):
+            traceback.print_exc(file=sys.stderr)
+        else:
+            print("(run with -v for the traceback)", file=sys.stderr, flush=True)
+        return emit_failure(exitcodes.for_exception(e), "internal", f"{type(e).__name__}: {e}")
+    finally:
+        cfg.set_cache_dir_override(prev_cache)
+
+
+def _run(a: dict, stages: dict[str, StageFn] | None, st: dict, emit_failure) -> int:
+    from grepchopflip import config as cfg
+    from grepchopflip import summary as sm
+
+    t0 = st["t0"]
+    as_json, full = st["json"], bool(a.get("json_full"))
     quiet, plain, verbose = bool(a.get("quiet")), bool(a.get("plain")), int(a.get("verbose") or 0)
     song = Path(a["song"])
-    warnings: list[str] = []
-
-    def emit_failure(code: int, stage: str, msg: str, out_dir: Path | None = None) -> int:
-        print(f"error: {msg}", file=sys.stderr, flush=True)
-        if as_json:
-            s = sm.build(input_path=str(song), out_dir=out_dir, stages={}, warnings=warnings,
-                         errors=[{"stage": stage, "error": msg}], exit_code=code, status="failed",
-                         total_s=time.perf_counter() - t0)
-            print(sm.to_json(s))
-        return code
+    warnings: list[str] = st["warnings"]
 
     flags = {k: a.get(k) for k in cfg.RUN_KEYS}
     cwd = Path.cwd()
     explicit = Path(a["config"]) if a.get("config") else None
-    try:
-        # pass 1 without the song folder: decides the library, hence where the song folder is
-        c1 = cfg.resolve_run_config(flags, cwd=cwd, explicit=explicit)
-        if c1["cache_dir"] is not None:
-            os.environ["GCF_CACHE_DIR"] = str(c1["cache_dir"])
-        out = Path(a["out"]) if a.get("out") else None
-        folder, audio = resolve_input(song, c1["library"], out)
-        conf = cfg.resolve_run_config(flags, song_dir=folder if explicit is None else None, cwd=cwd,
-                                      explicit=explicit, ignore_file_keys=("library", "cache_dir"))
-    except cfg.ConfigError as e:
-        return emit_failure(exitcodes.USAGE, "config", str(e))
-    except InputError as e:
-        return emit_failure(exitcodes.INPUT, "input", str(e))
+    # pass 1 without the song folder: decides the library, hence where the song folder is
+    c1 = cfg.resolve_run_config(flags, cwd=cwd, explicit=explicit)
+    out = Path(a["out"]) if a.get("out") else None
+    folder, audio = resolve_input(song, c1["library"], out)
+    st["out_dir"] = folder
+    conf = cfg.resolve_run_config(flags, song_dir=folder if explicit is None else None, cwd=cwd,
+                                  explicit=explicit, ignore_file_keys=("library", "cache_dir"))
+    if conf["cache_dir"] is not None:  # the final value; process-level, the environment is left alone
+        cfg.set_cache_dir_override(conf["cache_dir"])
     warnings.extend(conf.warnings)
 
     # settings an earlier run of this folder used win over defaults (not over flags/env/files)

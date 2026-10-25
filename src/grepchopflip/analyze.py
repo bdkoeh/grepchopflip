@@ -136,6 +136,67 @@ def _constants() -> dict:
     }
 
 
+def _input_name(p: Path, out: Path) -> str:
+    """Cache key of an input file: relative to the song folder when inside it (so `gcf analyze out/x`,
+    `/abs/out/x`, `gcf run` and a moved folder all agree), else the absolute path."""
+    rp, ro = Path(p).resolve(), Path(out).resolve()
+    try:
+        return rp.relative_to(ro).as_posix()
+    except ValueError:
+        return str(rp)
+
+
+def _cache_inputs(audio_or_out, out_dir, bpm_override, key_override, library) -> dict:
+    """Everything the cache decision depends on (read-only: hashes files, writes nothing)."""
+    if bpm_override is not None and not bpm_override > 0:
+        raise ValueError("--bpm must be positive")
+    key_ov = parse_key(key_override) if key_override else None
+    out, mix_paths, stems = _resolve_inputs(audio_or_out, out_dir, library)
+    key_stem_paths = {n: p for n, p in stems.items() if n in HARMONIC_STEMS}
+    use_stems_for_key = set(key_stem_paths) == set(HARMONIC_STEMS)
+    params = {
+        "bpm_override": bpm_override,
+        "key_override": list(key_ov) if key_ov else None,
+        "key_source": "stems" if use_stems_for_key else "mix",
+        "beat_this": metadata.version("beat-this"),
+        "librosa": metadata.version("librosa"),
+        "checkpoint_sha256": BEAT_THIS_SHA256,
+        "gcf_version": __version__,
+        "constants": _constants(),
+        "schema": SCHEMA_VERSION,
+    }
+    # every stem present is hashed: the drums stem feeds stem_loudness even though it is not used for key
+    inputs = {_input_name(p, out): sha256_path(p) for p in [*mix_paths, *stems.values()]}
+    input_key = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+    return {"out": out, "mix_paths": mix_paths, "stems": stems, "key_stem_paths": key_stem_paths,
+            "use_stems_for_key": use_stems_for_key, "key_ov": key_ov, "params": params, "inputs": inputs,
+            "input_key": input_key}
+
+
+def _cache_hit(ci: dict) -> bool:
+    out = ci["out"]
+    result_path, done_path = out / ANALYSIS_FILE, out / DONE_FILE
+    if not (result_path.is_file() and done_path.is_file()):
+        return False
+    try:
+        done = json.loads(done_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return done.get("input_key") == ci["input_key"] and done.get("params") == ci["params"]
+
+
+def cache_state(audio_or_out: Path | str, out_dir: Path | str | None = None, bpm_override: float | None = None,
+                key_override: str | None = None, library: Path | str | None = None) -> dict:
+    """Would `analyze` with these arguments be a cache hit? Read-only (used by `gcf run --dry-run`).
+    Returns {"cached": bool, "reason": str}. Raises AudioReadError like analyze when there is no input."""
+    ci = _cache_inputs(audio_or_out, out_dir, bpm_override, key_override, library)
+    if _cache_hit(ci):
+        return {"cached": True, "reason": "analysis cached"}
+    if not (ci["out"] / DONE_FILE).is_file():
+        return {"cached": False, "reason": "not analyzed yet"}
+    return {"cached": False, "reason": "inputs or settings changed"}
+
+
 def analyze(
     audio_or_out: Path | str,
     out_dir: Path | str | None = None,
@@ -150,37 +211,17 @@ def analyze(
     Raises AudioReadError (input unreadable or too short), ModelDownloadError (checkpoint unavailable),
     ModelLoadError / RuntimeError (torch or CUDA failure), ValueError (bad override values).
     """
-    if bpm_override is not None and not bpm_override > 0:
-        raise ValueError("--bpm must be positive")
-    key_ov = parse_key(key_override) if key_override else None
-
-    out, mix_paths, stems = _resolve_inputs(audio_or_out, out_dir, library)
-    key_stem_paths = {n: p for n, p in stems.items() if n in HARMONIC_STEMS}
-    use_stems_for_key = set(key_stem_paths) == set(HARMONIC_STEMS)
-
-    beat_version = metadata.version("beat-this")
-    params = {
-        "bpm_override": bpm_override,
-        "key_override": list(key_ov) if key_ov else None,
-        "key_source": "stems" if use_stems_for_key else "mix",
-        "beat_this": beat_version,
-        "librosa": metadata.version("librosa"),
-        "checkpoint_sha256": BEAT_THIS_SHA256,
-        "gcf_version": __version__,
-        "constants": _constants(),
-        "schema": SCHEMA_VERSION,
-    }
-    # every stem present is hashed: the drums stem feeds stem_loudness even though it is not used for key
-    inputs = {str(p): sha256_path(p) for p in [*mix_paths, *stems.values()]}
-    input_key = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+    ci = _cache_inputs(audio_or_out, out_dir, bpm_override, key_override, library)
+    out, mix_paths, stems = ci["out"], ci["mix_paths"], ci["stems"]
+    key_stem_paths, use_stems_for_key, key_ov = ci["key_stem_paths"], ci["use_stems_for_key"], ci["key_ov"]
+    params, inputs, input_key = ci["params"], ci["inputs"], ci["input_key"]
+    beat_version = params["beat_this"]
 
     result_path, done_path = out / ANALYSIS_FILE, out / DONE_FILE
-    if not force and result_path.is_file() and done_path.is_file():
+    if not force and _cache_hit(ci):
         try:
-            done = json.loads(done_path.read_text(encoding="utf-8"))
-            if done.get("input_key") == input_key and done.get("params") == params:
-                _log("analysis cached (use --force to recompute)")
-                return json.loads(result_path.read_text(encoding="utf-8"))
+            _log("analysis cached (use --force to recompute)")
+            return json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass
 

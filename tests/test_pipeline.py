@@ -84,11 +84,54 @@ def test_failed_stage_blocks_only_its_dependents(tmp_path, monkeypatch):
     assert st["separate"] == "cached" and st["analyze"] == "done" and st["chop"] == "done"
 
 
-def test_separate_failure_still_runs_analyze(tmp_path, monkeypatch):
+def test_separate_failure_still_runs_analyze_on_a_new_song(tmp_path, song, monkeypatch):
+    """The song folder does not exist yet (separation failed before creating it): analyze must read the song
+    file itself. The fake analyze fails without ctx.audio and without a folder, so this cannot pass vacuously."""
     monkeypatch.setenv("FAKE_FAIL", "separate")
-    _, code, st = run(ctx_for(tmp_path))
+    new = tmp_path / "lib" / "new-song"
+    ctx = pipeline.RunContext(input_path=song, out_dir=new, audio=song, duration_s=1.0)
+    _, code, st = run(ctx)
+    assert not new.exists() or not (new / ".fake" / "separate").exists()
     assert st["analyze"] == "done" and st["chop"] == "blocked"
     assert code == exitcodes.GPU
+
+    ctx2 = pipeline.RunContext(input_path=new, out_dir=tmp_path / "lib" / "other", audio=None, duration_s=1.0)
+    _, code, st = run(ctx2)
+    assert st["analyze"] == "failed"
+
+
+def test_real_stage_analyze_reads_the_song_file_when_known(tmp_path, song, monkeypatch):
+    import grepchopflip.analyze as an
+
+    calls = []
+    monkeypatch.setattr(an, "analyze", lambda *a, **k: calls.append((a, k)) or {"bpm": 90})
+    ctx = pipeline.RunContext(input_path=song, out_dir=tmp_path / "new", audio=song)
+    pipeline.stage_analyze(ctx)
+    ctx.audio = None
+    pipeline.stage_analyze(ctx)
+    assert calls[0][0] == (song, tmp_path / "new") and calls[1][0] == (tmp_path / "new",)
+
+
+def test_stage_problem_without_exception_maps_to_6(tmp_path):
+    def organize(ctx):
+        return {"cached": False, "errors": {"problems": "x not found"}, "produced": False}
+
+    res, code, st = run(ctx_for(tmp_path), organize=organize)
+    assert st["organize"] == "failed" and code == exitcodes.NOTHING
+    assert exitcodes.for_exception(res.first_error) == exitcodes.NOTHING
+
+
+def test_force_without_source_audio_keeps_stems(tmp_path):
+    ctx = ctx_for(tmp_path, force=True)
+    for p in pipeline._stem_files(ctx.out_dir):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    r = pipeline.stage_separate(ctx)
+    assert r["cached"] is True and "--force cannot redo separation" in ctx.warnings[0]
+    for p in pipeline._stem_files(ctx.out_dir)[:1]:
+        p.unlink()
+    with pytest.raises(InputError):
+        pipeline.stage_separate(ctx)
 
 
 def test_partial_chop_still_organizes_exit_10(tmp_path, monkeypatch):
@@ -126,8 +169,10 @@ def test_stale_index_does_not_count_when_organize_did_not_run(tmp_path, monkeypa
     ctx = ctx_for(tmp_path)
     run(ctx)                                   # leaves an index with samples
     monkeypatch.setenv("FAKE_FAIL", "separate,analyze")
-    _, code, st = run(ctx)
-    assert st["organize"] == "blocked" and code == exitcodes.GPU
+    res = pipeline.run_stages(ctx, pipefix.fake_stages())
+    code, index = pipeline.finish(ctx, res)
+    assert res.stages["organize"]["status"] == "blocked" and code == exitcodes.GPU
+    assert index is None                       # the summary then reports no index and 0 samples
 
 
 def test_exitcodes_overall():
@@ -159,30 +204,63 @@ def test_enrich_skipped_when_not_installed(tmp_path, monkeypatch):
     assert pipeline.finish(ctx, res)[0] == 0
 
 
-def test_enrich_called_with_accepted_kwargs_only(tmp_path, monkeypatch):
+def _with_enrich(monkeypatch, fn):
+    monkeypatch.setitem(sys.modules, "grepchopflip.enrich", types.SimpleNamespace(enrich=fn))
+    monkeypatch.setattr(pipeline, "enrich_available", lambda: True)
+
+
+def test_enrich_slice7_contract(tmp_path, monkeypatch):
+    """Exactly the signature agreed with slice 7."""
     seen = {}
 
-    def enrich(song_dir, force=False, tag=True):
-        seen.update(song_dir=song_dir, force=force, tag=tag)
+    def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embed: bool | None = None) -> dict:
+        seen.update(song_dir=song_dir, force=force, tag=tag, embed=embed)
         return {"cached": True, "samples": 3, "representatives": 2, "junk": 1}
 
-    monkeypatch.setitem(sys.modules, "grepchopflip.enrich", types.SimpleNamespace(enrich=enrich))
-    monkeypatch.setattr(pipeline, "enrich_available", lambda: True)
-    ctx = ctx_for(tmp_path, tag=False, embed=False)
+    _with_enrich(monkeypatch, enrich)
+    ctx = ctx_for(tmp_path, tag=False, embed=None)
     res = pipeline.run_stages(ctx, pipefix.fake_stages(enrich=pipeline.stage_enrich))
     assert res.stages["enrich"]["status"] == "cached"
     assert res.stages["enrich"]["details"] == {"samples": 3, "representatives": 2}
-    assert seen == {"song_dir": ctx.out_dir, "force": False, "tag": False}   # embed not accepted -> not passed
+    assert seen == {"song_dir": ctx.out_dir, "force": False, "tag": False, "embed": None}
+
+
+def test_enrich_signature_mismatch_is_a_clear_failure(tmp_path, monkeypatch):
+    def enrich(song_dir, *, force=False):          # no tag/embed: not the contract
+        return {}
+
+    _with_enrich(monkeypatch, enrich)
+    ctx = ctx_for(tmp_path)
+    res = pipeline.run_stages(ctx, pipefix.fake_stages(enrich=pipeline.stage_enrich))
+    e = res.stages["enrich"]
+    assert e["status"] == "failed" and "does not match the run contract" in e["error"]
+    assert "enrich(song_dir: Path, *, force" in e["error"]
+    assert pipeline.finish(ctx, res)[0] == exitcodes.PARTIAL      # organize finished, so exit 10
 
 
 def test_enrich_missing_extra_is_skipped_not_failed(tmp_path, monkeypatch):
     def enrich(song_dir, **kw):
         raise MissingDependencyError("install the `tag` extra")
 
-    monkeypatch.setitem(sys.modules, "grepchopflip.enrich", types.SimpleNamespace(enrich=enrich))
-    monkeypatch.setattr(pipeline, "enrich_available", lambda: True)
+    _with_enrich(monkeypatch, enrich)
     res = pipeline.run_stages(ctx_for(tmp_path), pipefix.fake_stages(enrich=pipeline.stage_enrich))
     assert res.stages["enrich"]["status"] == "skipped" and "tag" in res.stages["enrich"]["reason"]
+
+    def enrich2(song_dir, **kw):
+        raise ModuleNotFoundError("No module named 'transformers'", name="transformers")
+
+    _with_enrich(monkeypatch, enrich2)
+    res = pipeline.run_stages(ctx_for(tmp_path), pipefix.fake_stages(enrich=pipeline.stage_enrich))
+    assert res.stages["enrich"]["status"] == "skipped"
+
+
+def test_enrich_broken_internal_import_fails(tmp_path, monkeypatch):
+    def enrich(song_dir, **kw):
+        raise ModuleNotFoundError("No module named 'grepchopflip.enrich.dedupe'", name="grepchopflip.enrich.dedupe")
+
+    _with_enrich(monkeypatch, enrich)
+    res = pipeline.run_stages(ctx_for(tmp_path), pipefix.fake_stages(enrich=pipeline.stage_enrich))
+    assert res.stages["enrich"]["status"] == "failed" and "grepchopflip.enrich.dedupe" in res.stages["enrich"]["error"]
 
 
 # ---------------------------------------------------------------- progress
@@ -335,6 +413,127 @@ def test_recorded_settings(tmp_path):
     (f / ".organize.json").write_text(json.dumps({"bit_depth": 16}))
     assert pipeline.recorded_settings(f) == {"fast": True, "sensitivity": 0.7, "bit_depth": 16}
     assert pipeline.recorded_settings(tmp_path / "none") == {}
+    (f / "chops" / "bass").mkdir()
+    (f / "chops" / "bass" / "chops.json").write_text(json.dumps({"params": {"sensitivity": 0.7}, "chops": []}))
+    assert pipeline.recorded_settings(f)["sensitivity"] == 0.7          # stems agree
+    (f / "chops" / "bass" / "chops.json").write_text(json.dumps({"params": {"sensitivity": 0.3}, "chops": []}))
+    assert "sensitivity" not in pipeline.recorded_settings(f)          # stems disagree: keep the default
+
+
+def test_plan_propagates_reruns_from_separate_and_chop_not_analyze(tmp_path, monkeypatch):
+    import grepchopflip.analyze as an
+
+    ctx = ctx_for(tmp_path)                       # audio None, all stems present -> separate skip
+    for p in pipeline._stem_files(ctx.out_dir):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    monkeypatch.setattr(pipeline, "enrich_available", lambda: False)
+    monkeypatch.setattr(an, "cache_state", lambda *a, **k: {"cached": False, "reason": "inputs or settings changed"})
+    monkeypatch.setattr(pipeline, "_chops_look_done", lambda f: True)
+    monkeypatch.setattr(pipeline, "_organize_looks_done", lambda f: True)
+    act = lambda p: {k: v["action"] for k, v in p["stages"].items()}   # noqa: E731
+    assert act(pipeline.plan(ctx, onsets=False)) == {
+        "separate": "skip", "analyze": "run", "chop": "skip", "organize": "skip", "enrich": "skip"}
+    monkeypatch.setattr(pipeline, "_chops_look_done", lambda f: False)
+    assert act(pipeline.plan(ctx, onsets=False))["organize"] == "run"
+    monkeypatch.setattr(an, "cache_state", lambda *a, **k: {"cached": True, "reason": "analysis cached"})
+    monkeypatch.setattr(pipeline, "_chops_look_done", lambda f: True)
+    assert set(act(pipeline.plan(ctx, onsets=False)).values()) == {"skip"}
+
+
+# ---------------------------------------------------------------- run_from_cli: cache dir, JSON on every path
+
+
+def _cli_args(song, tmp_path, **kw):
+    a = {"song": song, "library": tmp_path / "lib", "json": True, "progress": "none"}
+    a.update(kw)
+    return a
+
+
+def test_cache_dir_override_never_touches_the_environment(song, tmp_path, monkeypatch, capsys):
+    from grepchopflip import config
+
+    monkeypatch.delenv("GCF_CACHE_DIR", raising=False)
+    seen = {}
+
+    def separate(ctx):
+        seen["cache"] = config.cache_dir()
+        return {"cached": False}
+
+    code = pipeline.run_from_cli(_cli_args(song, tmp_path, cache_dir=tmp_path / "c"),
+                                 pipefix.fake_stages(separate=separate))
+    assert code == 0 and seen["cache"] == tmp_path / "c"
+    assert "GCF_CACHE_DIR" not in __import__("os").environ
+    assert config.cache_dir() != tmp_path / "c"                       # restored after the run
+    assert json.loads(capsys.readouterr().out)["config"]["sources"]["cache_dir"] == "flag"
+
+
+def test_song_folder_cache_dir_is_really_ignored(song, tmp_path, monkeypatch, capsys):
+    """`cd <song folder> && gcf run .`: the song folder's gcf.toml is also the cwd file; its cache_dir is ignored
+    (as the warning says) and not applied."""
+    from grepchopflip import config
+
+    monkeypatch.delenv("GCF_CACHE_DIR", raising=False)
+    folder, _ = pipeline.resolve_input(song, tmp_path / "lib")
+    folder.mkdir(parents=True)
+    (folder / "source.json").write_text(json.dumps({"path": str(song)}))
+    (folder / "gcf.toml").write_text('cache_dir = "/nowhere/cache"\n')
+    monkeypatch.chdir(folder)
+    seen = {}
+
+    def separate(ctx):
+        seen["cache"] = config.cache_dir()
+        return {"cached": False}
+
+    pipeline.run_from_cli(_cli_args(Path("."), tmp_path), pipefix.fake_stages(separate=separate))
+    doc = json.loads(capsys.readouterr().out)
+    assert seen["cache"] != Path("/nowhere/cache")
+    assert doc["config"]["sources"]["cache_dir"] == "default"
+    assert any("ignored in a song folder" in w for w in doc["warnings"])
+
+
+def test_internal_error_is_json_and_traceback_only_with_v(song, tmp_path, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise ValueError("glue bug")
+
+    monkeypatch.setattr(pipeline, "resolve_input", boom)
+    code = pipeline.run_from_cli(_cli_args(song, tmp_path))
+    cap = capsys.readouterr()
+    doc = json.loads(cap.out)
+    assert code == exitcodes.NOTHING and doc["errors"] == [{"stage": "internal", "error": "ValueError: glue bug"}]
+    assert "Traceback" not in cap.err and "-v" in cap.err
+    pipeline.run_from_cli(_cli_args(song, tmp_path, verbose=1))
+    assert "Traceback" in capsys.readouterr().err
+
+
+def test_permission_error_on_input_is_exit_3(song, tmp_path, monkeypatch, capsys):
+    def denied(*a, **k):
+        raise PermissionError(13, "Permission denied", str(song))
+
+    monkeypatch.setattr(pipeline, "resolve_input", denied)
+    assert pipeline.run_from_cli(_cli_args(song, tmp_path)) == exitcodes.INPUT
+    assert json.loads(capsys.readouterr().out)["errors"][0]["stage"] == "input"
+
+
+def test_ctrl_c_under_json_still_prints_json(song, tmp_path, capsys):
+    def interrupted(ctx):
+        raise KeyboardInterrupt
+
+    code = pipeline.run_from_cli(_cli_args(song, tmp_path), pipefix.fake_stages(chop=interrupted))
+    doc = json.loads(capsys.readouterr().out)
+    assert code == 130 and doc["status"] == "failed" and doc["errors"][0]["stage"] == "interrupted"
+
+
+def test_cache_dir_override_order(tmp_path, monkeypatch):
+    from grepchopflip import config
+
+    monkeypatch.setenv("GCF_CACHE_DIR", str(tmp_path / "env"))
+    prev = config.set_cache_dir_override(tmp_path / "flag")
+    try:
+        assert config.cache_dir() == tmp_path / "flag"
+    finally:
+        config.set_cache_dir_override(prev)
+    assert config.cache_dir() == tmp_path / "env"
 
 
 def test_dry_run_plan_writes_nothing(song, tmp_path, monkeypatch):
