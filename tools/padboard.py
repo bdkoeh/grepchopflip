@@ -102,10 +102,10 @@ def _review_flags(folder: Path) -> dict[str, list[str]]:
                 doc = json.loads(cj.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            # chops.json paths are relative to the song folder (the one containing chops/)
-            song = base if (base / "chops").is_dir() else base.parent if (base.parent / "chops").is_dir() else None
+            # chops.json paths are relative to the song folder: the nearest ancestor that contains chops/
+            song = next((a for a in (base, *base.parents) if (a / "chops").is_dir()), base)
             for c in doc.get("chops", []):
-                p = (song / c["path"]) if song else (base / c["path"])
+                p = song / c["path"]
                 try:
                     rel = p.resolve().relative_to(folder.resolve()).as_posix()
                 except ValueError:
