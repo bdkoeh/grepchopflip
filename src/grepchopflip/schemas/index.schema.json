@@ -2,12 +2,42 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grepchopflip.example/schemas/index.schema.json",
   "title": "gcf song index",
-  "description": "index.json at the root of one song folder: every organized sample with its facts. Every sample path is relative to the song folder (D-048), so the folder can be moved. Fields are nullable rather than missing. `character`, `dedup_group` and `is_dedup_representative` are reserved for slice 7 and are null in 1.0.",
+  "description": "index.json at the root of one song folder: every organized sample with its facts. Every sample path is relative to the song folder (D-048), so the folder can be moved. Fields are nullable rather than missing. 1.1 (slice 7) adds the `gcf enrich` fields: per sample `character`, `features`, `class_confidence`, `classifier_class`, `dedup_group`, `is_dedup_representative`, `dedup_size`, `embedding_ref`, `wav_chunks` (null until `gcf enrich` runs), and top-level `counts` and `enrichment`. The curated set is the samples with `is_dedup_representative` true (D-050). 1.0 files still validate.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "generator", "created", "source", "analysis", "models", "params", "stages", "samples"],
+  "if": {"properties": {"schema_version": {"const": "1.1"}}},
+  "then": {
+    "required": ["counts", "enrichment"],
+    "properties": {"samples": {"items": {"required": ["features", "class_confidence", "classifier_class", "dedup_size", "embedding_ref", "wav_chunks"]}}}
+  },
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"enum": ["1.0", "1.1"]},
+    "counts": {
+      "type": "object",
+      "description": "Totals per class. `representatives` counts samples with is_dedup_representative true (null before `gcf enrich`).",
+      "additionalProperties": false,
+      "required": ["total", "representatives", "review", "classes"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "representatives": {"type": ["integer", "null"], "minimum": 0},
+        "review": {"type": "integer", "minimum": 0},
+        "classes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["total", "representatives", "review"],
+            "properties": {
+              "total": {"type": "integer", "minimum": 0},
+              "representatives": {"type": ["integer", "null"], "minimum": 0},
+              "review": {"type": "integer", "minimum": 0}
+            }
+          }
+        }
+      }
+    },
+    "enrichment": {"type": ["object", "null"], "description": "How `gcf enrich` measured: character thresholds per class, dedup thresholds, classifier flag rule, embeddings file."},
     "generator": {
       "type": "object",
       "additionalProperties": false,
@@ -63,7 +93,8 @@
         "separate": {"$ref": "#/$defs/stage"},
         "analyze": {"$ref": "#/$defs/stage"},
         "chop": {"$ref": "#/$defs/stage"},
-        "organize": {"$ref": "#/$defs/stage"}
+        "organize": {"$ref": "#/$defs/stage"},
+        "enrich": {"$ref": "#/$defs/stage"}
       }
     },
     "samples": {"type": "array", "items": {"$ref": "#/$defs/sample"}}
@@ -122,10 +153,60 @@
         "fade_in_ms": {"type": ["number", "null"]},
         "fade_out_ms": {"type": ["number", "null"]},
         "zero_snapped": {"type": ["boolean", "null"]},
-        "character": {"type": ["array", "null"], "items": {"type": "string"}, "description": "Slice 7."},
-        "dedup_group": {"type": ["string", "integer", "null"], "description": "Slice 7."},
-        "is_dedup_representative": {"type": ["boolean", "null"], "description": "Slice 7."},
-        "tags": {"type": "array", "items": {"type": "string"}},
+        "character": {"type": ["array", "null"], "items": {"enum": ["bright", "dark", "punchy", "soft", "long", "short", "noisy", "tonal"]}, "description": "Character words relative to the other samples of the same class in this song (p75/p25 thresholds in enrichment.character)."},
+        "features": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["brightness", "hardness", "spectral_flatness", "spectral_centroid_hz"],
+          "properties": {
+            "brightness": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+            "hardness": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+            "spectral_flatness": {"type": ["number", "null"], "minimum": 0},
+            "spectral_centroid_hz": {"type": ["number", "null"], "minimum": 0}
+          }
+        },
+        "class_confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Extra `tag`: AST probability of the sample's drum family among kick/snare/hat/cymbal; null for other classes."},
+        "classifier_class": {"enum": ["Kick", "Snare", "Hat", "Cymbal", null], "description": "Extra `tag`: the drum family AST prefers."},
+        "dedup_group": {"type": ["string", "integer", "null"], "description": "Near-duplicate group id, unique within the song (`<Class>-<NNN>`); every sample has one after `gcf enrich`."},
+        "is_dedup_representative": {"type": ["boolean", "null"], "description": "True for the one sample per group shown by default (D-050)."},
+        "dedup_size": {"type": ["integer", "null"], "minimum": 1},
+        "embedding_ref": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["file", "row"],
+          "properties": {"file": {"$ref": "#/$defs/relpath"}, "row": {"type": "integer", "minimum": 0}}
+        },
+        "wav_chunks": {
+          "type": ["object", "null"],
+          "description": "What the WAV header carries besides fmt/data (values duplicated so agents never parse chunks).",
+          "additionalProperties": false,
+          "required": ["info", "smpl", "acid"],
+          "properties": {
+            "info": {"type": "boolean"},
+            "smpl": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["unity_note", "loop"],
+              "properties": {
+                "unity_note": {"type": "integer", "minimum": 0, "maximum": 127},
+                "loop": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2}
+              }
+            },
+            "acid": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["one_shot", "root_note", "beats", "meter", "tempo"],
+              "properties": {
+                "one_shot": {"type": "boolean"},
+                "root_note": {"type": ["integer", "null"]},
+                "beats": {"type": "integer", "minimum": 0},
+                "meter": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+                "tempo": {"type": "number", "minimum": 0}
+              }
+            }
+          }
+        },
+        "tags": {"type": "array", "items": {"type": "string"}, "description": "Extra `tag`: top AudioSet labels (probability >= 0.1)."},
         "source_file": {"type": ["string", "null"]},
         "source_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}

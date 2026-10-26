@@ -205,6 +205,7 @@ def test_enrich_skipped_when_not_installed(tmp_path, monkeypatch):
 
 
 def _with_enrich(monkeypatch, fn):
+    import grepchopflip.enrich  # noqa: F401  the real package is loaded (organize imports it); the stub must still win
     monkeypatch.setitem(sys.modules, "grepchopflip.enrich", types.SimpleNamespace(enrich=fn))
     monkeypatch.setattr(pipeline, "enrich_available", lambda: True)
 
@@ -213,16 +214,17 @@ def test_enrich_slice7_contract(tmp_path, monkeypatch):
     """Exactly the signature agreed with slice 7."""
     seen = {}
 
-    def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embed: bool | None = None) -> dict:
-        seen.update(song_dir=song_dir, force=force, tag=tag, embed=embed)
+    def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embed: bool | None = None,
+               device: str = "cuda") -> dict:
+        seen.update(song_dir=song_dir, force=force, tag=tag, embed=embed, device=device)
         return {"cached": True, "samples": 3, "representatives": 2, "junk": 1}
 
     _with_enrich(monkeypatch, enrich)
-    ctx = ctx_for(tmp_path, tag=False, embed=None)
+    ctx = ctx_for(tmp_path, tag=False, embed=None, device="cpu")
     res = pipeline.run_stages(ctx, pipefix.fake_stages(enrich=pipeline.stage_enrich))
     assert res.stages["enrich"]["status"] == "cached"
     assert res.stages["enrich"]["details"] == {"samples": 3, "representatives": 2}
-    assert seen == {"song_dir": ctx.out_dir, "force": False, "tag": False, "embed": None}
+    assert seen == {"song_dir": ctx.out_dir, "force": False, "tag": False, "embed": None, "device": "cpu"}
 
 
 def test_enrich_signature_mismatch_is_a_clear_failure(tmp_path, monkeypatch):

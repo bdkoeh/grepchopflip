@@ -543,6 +543,103 @@ def index(
 
 
 @app.command()
+def enrich(
+    song_dir: Path = typer.Argument(..., help="Organized song folder (after `gcf organize`)."),
+    tag: Optional[bool] = typer.Option(None, "--tag/--no-tag", help="AudioSet tags and the drum-class check "
+                                       "(extra `tag`; default: run when installed)."),
+    embed: Optional[bool] = typer.Option(None, "--embed/--no-embed", help="CLAP embeddings (extra `embed`; "
+                                         "default: run when installed)."),
+    device: str = typer.Option("cuda", "--device", help="cuda or cpu, for the extras' models."),
+    force: bool = typer.Option(False, "--force", help="Recompute everything instead of reusing earlier results."),
+    as_json: bool = typer.Option(False, "--json", help="Print a JSON summary on stdout."),
+) -> None:
+    """Character words, duplicate groups (one representative each), WAV smpl/acid chunks; tags and embeddings
+    when their extras are installed. Updates index.json in place; nothing is deleted."""
+    import contextlib
+    import logging
+
+    import soundfile as sf
+    from rich.logging import RichHandler
+
+    from grepchopflip import enrich as enr
+    from grepchopflip import organize as org
+    from grepchopflip.enrich.wavchunks import WavChunkError
+    from grepchopflip.errors import InputError
+    from grepchopflip.models import ModelDownloadError
+
+    if device not in ("cuda", "cpu"):
+        err.print(f"error: --device must be cuda or cpu, not {device!r}", highlight=False, markup=False)
+        raise typer.Exit(EXIT_USAGE)
+    handler = RichHandler(console=err, show_path=False, show_time=False, markup=False)
+    pkg_log = logging.getLogger("grepchopflip")
+    pkg_log.addHandler(handler)
+    old_level = pkg_log.level
+    pkg_log.setLevel(logging.INFO)
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            r = enr.enrich(song_dir, force=force, tag=tag, embed=embed, device=device)
+    except org.PartialOrganize as e:
+        err.print(f"error: {e}; run `gcf enrich` again", highlight=False, markup=False)
+        raise typer.Exit(EXIT_PARTIAL)
+    except ModelDownloadError as e:
+        err.print(f"error: {e}", highlight=False, markup=False)
+        raise typer.Exit(EXIT_MODEL)
+    except (InputError, OSError, sf.LibsndfileError, WavChunkError) as e:
+        err.print(f"error: {e}", highlight=False, markup=False)
+        raise typer.Exit(EXIT_INPUT)
+    finally:
+        pkg_log.removeHandler(handler)
+        pkg_log.setLevel(old_level)
+    for name, why in r["skipped"].items():
+        err.print(f"{name}: {why}", highlight=False, markup=False)
+    for p in r["problems"]:
+        err.print(f"error: {p}", highlight=False, markup=False)
+    if as_json:
+        print(json.dumps(r, indent=2))
+        raise typer.Exit(EXIT_PARTIAL if r["problems"] else EXIT_OK)
+    print(f"enrich: {'cached' if r['cached'] else 'written'}  {r['samples']} samples, {r['representatives']} "
+          f"representatives ({r['review']} to review)  {song_dir / r['index']}")
+    for cls, c in r["counts"]["classes"].items():
+        print(f"  {cls}: {c['total']} -> {c['representatives']}")
+    print(enr.AGENT_HINT)
+    if r["problems"]:
+        raise typer.Exit(EXIT_PARTIAL)
+
+
+models_app = typer.Typer(help="Model downloads (checksummed, pinned revisions).", no_args_is_help=True)
+app.add_typer(models_app, name="models")
+
+
+@models_app.command("pull")
+def models_pull(
+    all_models: bool = typer.Option(False, "--all", help="Every model gcf downloads itself: beat tracker, "
+                                    "tag (AST) and embed (CLAP). Stem separators download on first `gcf separate`."),
+    extra: Optional[list[str]] = typer.Option(None, "--extra", help="Models of an extra: tag or embed "
+                                              "(repeatable). Without options: the core beat tracker."),
+    as_json: bool = typer.Option(False, "--json", help="Print a JSON summary on stdout."),
+) -> None:
+    """Prefetch models so later runs work offline."""
+    from grepchopflip import models
+
+    extras = [e.strip() for x in (extra or []) for e in x.split(",") if e.strip()]
+    bad = [e for e in extras if e not in models.EXTRA_MODELS]
+    if bad:
+        err.print(f"error: --extra takes {' or '.join(models.EXTRA_MODELS)} (got {', '.join(bad)})",
+                  highlight=False, markup=False)
+        raise typer.Exit(EXIT_USAGE)
+    try:
+        got = models.pull(extras, all_models=all_models)
+    except models.ModelDownloadError as e:
+        err.print(f"error: {e}", highlight=False, markup=False)
+        raise typer.Exit(EXIT_MODEL)
+    if as_json:
+        print(json.dumps(got, indent=2))
+        return
+    for m in got:
+        print(f"{m['model']}: {'cached' if m['cached'] else 'downloaded'}  ({m['license']})  {m['path']}")
+
+
+@app.command()
 def run(
     ctx: typer.Context,
     song: Path = typer.Argument(..., readable=False,  # unreadable input is exit 3 (with JSON), not a usage error

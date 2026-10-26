@@ -4,7 +4,7 @@ version = "0.1.0.dev0"
 description = "grep | chop | flip: turn one song into a library of well-cut, labeled samples with a JSON index. Built for agents to call."
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "LICENSES/*"]   # LICENSES/: Apache-2.0 text for code adapted from AudioCommons
 requires-python = ">=3.12,<3.13"
 authors = [{ name = "Bob" }]
 keywords = ["audio", "samples", "stem-separation", "beat-making", "cli", "agent"]
@@ -45,6 +45,10 @@ words = [
   "nvidia-cudnn-cu12; sys_platform == 'linux'",
 ]
 notes = ["muscriptor"]         # weights are CC BY-NC 4.0 (non-commercial); gcf prints a notice on first use
+# `gcf enrich` extras (D-041): AST instrument tags (BSD-3-Clause weights) and CLAP embeddings (Apache-2.0
+# weights). Both run on torch from the core; weights come from Hugging Face via `gcf models pull`.
+tag = ["transformers>=5,<6"]
+embed = ["transformers>=5,<6"]
 
 [project.scripts]
 gcf = "grepchopflip.cli:app"
@@ -55,6 +59,7 @@ Homepage = "https://github.com/grepchopflip/grepchopflip"
 [dependency-groups]
 dev = [
   "pytest>=8",
+  "wavinfo>=2",                # independent reader for the smpl chunk round-trip test
 ]
 
 [build-system]

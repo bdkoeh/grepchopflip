@@ -277,7 +277,7 @@ def enrich_available() -> bool:
 
 
 ENRICH_CONTRACT = ("enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, "
-                   "embed: bool | None = None) -> dict")
+                   "embed: bool | None = None, device: str = 'cuda') -> dict")
 
 
 def _missing_extra(e: BaseException) -> bool:
@@ -291,11 +291,13 @@ def _missing_extra(e: BaseException) -> bool:
 
 
 def stage_enrich(ctx: RunContext) -> dict:
-    """Slice 7 contract: `grepchopflip.enrich.enrich(song_dir, *, force, tag, embed) -> dict` (ENRICH_CONTRACT)."""
+    """Slice 7 contract: `grepchopflip.enrich.enrich(song_dir, *, force, tag, embed, device) -> dict` (ENRICH_CONTRACT)."""
     if not enrich_available():
         raise StageSkipped("enrich is not part of this gcf install")
     try:
-        import grepchopflip.enrich as mod  # type: ignore[import-not-found]
+        # import_module reads sys.modules, so a replaced module is honoured even when organize already
+        # imported the real package (and set it as an attribute of grepchopflip)
+        mod = importlib.import_module("grepchopflip.enrich")
     except Exception as e:
         if _missing_extra(e):
             raise StageSkipped(f"enrich extras missing: {e}") from e
@@ -304,7 +306,7 @@ def stage_enrich(ctx: RunContext) -> dict:
     fn = getattr(mod, "enrich", None)
     if not callable(fn):
         raise _StageProblem(f"grepchopflip.enrich has no enrich() function; expected {ENRICH_CONTRACT}")
-    kwargs = {"force": ctx.force, "tag": ctx.tag, "embed": ctx.embed}
+    kwargs = {"force": ctx.force, "tag": ctx.tag, "embed": ctx.embed, "device": ctx.device}
     try:
         inspect.signature(fn).bind(ctx.out_dir, **kwargs)
     except TypeError as e:
