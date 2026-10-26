@@ -5,7 +5,9 @@ Summary shape (stable keys; values may be null):
 
     {
       "gcf_version": "...", "status": "ok|partial|failed|nothing|dry_run", "exit_code": 0,
-      "input": "<path given>", "out_dir": "<song folder>", "index": "<song folder>/index.json" | null,
+      "input": "<path given>", "out_dir": "<song folder>",
+      "split": "vocals,drums+bass+other" | null, "groups": ["vocals", "inst"] | null,     (slice 13)
+      "index": "<song folder>/index.json" | null,
       "samples": 898, "review": 120,
       "counts": {"class": {"Kick": 40, ...}, "kind": {"oneshot": 700, ...}, "folder": {"oneshots/kick": 30, ...}},
       "analysis": {"bpm": 92.0, "tempo_reliable": true, "key": "A", "mode": "minor"},

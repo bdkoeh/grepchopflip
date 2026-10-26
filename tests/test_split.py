@@ -190,6 +190,24 @@ def test_song_folder_gcf_toml_cannot_set_the_split(tmp_path):
     assert c["split"] == "all" and any("'split' is ignored" in w for w in c.warnings)
 
 
+def test_padboard_gets_one_board_per_folder_under_chops_and_skips_hidden_parts(tmp_path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("padboard", Path(__file__).parents[1] / "tools" / "padboard.py")
+    pb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pb)
+    root = tmp_path / "song"
+    cases = {
+        "chops/inst/loops/instloop_1bar_001.wav": root / "chops" / "inst",
+        "chops/vocals+bass+other/phrases/vocalsbassotherphrase_0001.wav": root / "chops" / "vocals+bass+other",
+        "chops/drums/oneshots/kick/kick_0001.wav": root / "chops" / "drums",
+        "loops/inst/InstLoop_01_1bar_92bpm.wav": root / "loops",
+        "stems/.grid/kick.wav": None,
+    }
+    for rel, want in cases.items():
+        assert pb._board_dir(root, root / rel) == want, rel
+
+
 def test_help_text_states_the_split_vs_stems_rule():
     assert "--split decides what exists; chop --stems picks among what exists" in sp.HELP
     from typer.testing import CliRunner
