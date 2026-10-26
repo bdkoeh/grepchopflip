@@ -13,8 +13,72 @@ from typing import Optional
 import typer
 from rich.console import Console
 from rich.table import Table
+from typer._click.exceptions import UsageError  # typer vendors click (typer>=0.26, pinned <0.28)
+from typer.core import TyperGroup
 
 from grepchopflip import __version__
+from grepchopflip.chop.registry import CHOP_STEMS, EXTRA_NAMES as CHOP_EXTRAS  # one list, shared with `run`
+
+
+def _normalize_json_flag(args: list[str]) -> list[str]:
+    """`--json=summary` -> `--json`, `--json=full` -> `--json --json-full` (brief section 8). A plain `--json`
+    stays a flag, so `gcf run --json song.wav` never swallows the song as the flag's value."""
+    out: list[str] = []
+    for i, x in enumerate(args):
+        if x == "--":
+            return out + args[i:]
+        if x == "--json=summary":
+            out.append("--json")
+        elif x == "--json=full":
+            out += ["--json", "--json-full"]
+        else:
+            out.append(x)
+    return out
+
+
+def _wants_json(args) -> bool:
+    for x in args:
+        if x == "--":
+            return False
+        if x == "--json" or x.startswith("--json="):
+            return True
+    return False
+
+
+class _GcfGroup(TyperGroup):
+    """Normalizes `--json=...`, and turns a usage error into a JSON failure on stdout (exit 2) when the command
+    line asked for JSON, so an agent always gets JSON."""
+
+    _json_wanted = False
+
+    def parse_args(self, ctx, args):  # type: ignore[override]
+        return super().parse_args(ctx, _normalize_json_flag(list(args)))
+
+    def _json_usage(self, e) -> None:
+        from grepchopflip import summary
+
+        if not (self._json_wanted and isinstance(e, UsageError)):
+            return
+        msg = e.format_message()
+        print(f"error: {msg}", file=sys.stderr, flush=True)
+        print(summary.to_json(summary.failure(None, "usage", msg, EXIT_USAGE)), flush=True)
+        raise typer.Exit(EXIT_USAGE)
+
+    def make_context(self, info_name, args, parent=None, **extra):  # type: ignore[override]
+        self._json_wanted = _wants_json(args)
+        try:
+            return super().make_context(info_name, args, parent=parent, **extra)
+        except UsageError as e:
+            self._json_usage(e)
+            raise
+
+    def invoke(self, ctx):  # type: ignore[override]
+        try:
+            return super().invoke(ctx)
+        except UsageError as e:
+            self._json_usage(e)
+            raise
+
 
 app = typer.Typer(
     name="gcf",
@@ -22,6 +86,7 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
     rich_markup_mode="rich",
+    cls=_GcfGroup,
 )
 
 err = Console(stderr=True)
@@ -51,13 +116,45 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+_PROGRESS_HELP = "Progress on stderr: auto (bar on a terminal, else lines), bar, lines (`stage=chop pct=42 eta=31`), none."
+
+
 @app.callback()
 def main(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False, "--version", callback=_version_callback, is_eager=True, help="Print version and exit."
     ),
+    as_json: bool = typer.Option(False, "--json", help="(run only) JSON summary on stdout (--json=full adds the "
+                                                       "index)."),
+    json_full: bool = typer.Option(False, "--json-full", hidden=True),
+    plain: bool = typer.Option(False, "--plain", help="(run only) No colors or progress bars on stderr."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="(run only) Only errors and the result."),
+    verbose: int = typer.Option(0, "--verbose", "-v", count=True, show_default=False, metavar="",
+                                help="(run only) More detail on stderr, tracebacks on failure."),
+    no_input: bool = typer.Option(False, "--no-input", help="Never prompt. Accepted for scripts; gcf never "
+                                                            "prompts anyway."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="(run only) Print the plan; change nothing."),
+    config: Optional[Path] = typer.Option(None, "--config", help="(run only) Use this config file instead of "
+                                                                 "gcf.toml / ~/.config/gcf/config.toml."),
+    cache_dir: Optional[Path] = typer.Option(None, "--cache-dir", help="Model cache folder (default: "
+                                                                       "$GCF_CACHE_DIR or ~/.cache/gcf)."),
+    progress: Optional[str] = typer.Option(None, "--progress", help="(run only) " + _PROGRESS_HELP),
 ) -> None:
+    """Global flags go before the command (`gcf --quiet run song.wav`); `run` also accepts them after it."""
     _utf8_streams()
+    if cache_dir is not None:
+        from grepchopflip.config import set_cache_dir_override
+
+        set_cache_dir_override(cache_dir)
+    run_only = {"--json": as_json or json_full, "--plain": plain, "--quiet": quiet, "--verbose": bool(verbose),
+                "--dry-run": dry_run, "--config": config is not None, "--progress": progress is not None}
+    used = [k for k, v in run_only.items() if v]
+    if ctx.invoked_subcommand not in (None, "run") and used:
+        raise UsageError(f"{', '.join(used)} only apply to `gcf run`; give the command's own flags after "
+                         f"it (`gcf {ctx.invoked_subcommand} ... --json`)", ctx=ctx)
+    ctx.obj = {"json": as_json, "json_full": json_full, "plain": plain, "quiet": quiet, "verbose": verbose,
+               "dry_run": dry_run, "config": config, "cache_dir": cache_dir, "progress": progress}
 
 
 @app.command()
@@ -222,29 +319,19 @@ def analyze(
         print("overrides: " + ", ".join(f"{k}={v}" for k, v in result["overrides"].items()))
 
 
-CHOP_STEMS = ("drums", "bass", "other", "vocals")
-CHOP_EXTRAS = ("words", "notes")
 
 
 def _choppers() -> dict:
-    """Stem name -> chopper(out_dir, sensitivity=..., force=...) -> summary dict. Imports are lazy so
-    `gcf --help` stays fast and the core never imports the extras."""
-    from grepchopflip.chop.bass import chop_bass
-    from grepchopflip.chop.drums import chop_drums
-    from grepchopflip.chop.melodic import chop_melodic
-    from grepchopflip.chop.vocals import chop_vocals
+    """Stem name -> chopper(out_dir, sensitivity=..., force=...) -> summary dict (chop/registry.py)."""
+    from grepchopflip.chop.registry import core_choppers
 
-    return {"drums": chop_drums, "bass": chop_bass, "other": chop_melodic, "vocals": chop_vocals}
+    return core_choppers()
 
 
 def _extra_chopper(name: str):
-    if name == "words":
-        from grepchopflip.chop.words_whisper import chop_words
+    from grepchopflip.chop.registry import chopper
 
-        return chop_words
-    from grepchopflip.chop.notes_muscriptor import chop_notes
-
-    return chop_notes
+    return chopper(name)
 
 
 @app.command()
@@ -458,8 +545,10 @@ def index(
 @app.command()
 def enrich(
     song_dir: Path = typer.Argument(..., help="Organized song folder (after `gcf organize`)."),
-    no_tag: bool = typer.Option(False, "--no-tag", help="Skip AudioSet tags and the drum-class check (extra `tag`)."),
-    no_embed: bool = typer.Option(False, "--no-embed", help="Skip CLAP embeddings (extra `embed`)."),
+    tag: Optional[bool] = typer.Option(None, "--tag/--no-tag", help="AudioSet tags and the drum-class check "
+                                       "(extra `tag`; default: run when installed)."),
+    embed: Optional[bool] = typer.Option(None, "--embed/--no-embed", help="CLAP embeddings (extra `embed`; "
+                                         "default: run when installed)."),
     device: str = typer.Option("cuda", "--device", help="cuda or cpu, for the extras' models."),
     force: bool = typer.Option(False, "--force", help="Recompute everything instead of reusing earlier results."),
     as_json: bool = typer.Option(False, "--json", help="Print a JSON summary on stdout."),
@@ -488,7 +577,7 @@ def enrich(
     pkg_log.setLevel(logging.INFO)
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            r = enr.enrich(song_dir, force=force, tag=not no_tag, embed=not no_embed, device=device)
+            r = enr.enrich(song_dir, force=force, tag=tag, embed=embed, device=device)
     except org.PartialOrganize as e:
         err.print(f"error: {e}; run `gcf enrich` again", highlight=False, markup=False)
         raise typer.Exit(EXIT_PARTIAL)
@@ -548,6 +637,53 @@ def models_pull(
         return
     for m in got:
         print(f"{m['model']}: {'cached' if m['cached'] else 'downloaded'}  ({m['license']})  {m['path']}")
+
+
+@app.command()
+def run(
+    ctx: typer.Context,
+    song: Path = typer.Argument(..., readable=False,  # unreadable input is exit 3 (with JSON), not a usage error
+                                help="Song file (wav, flac, aiff, mp3, m4a, ogg) or an existing song folder."),
+    out: Optional[Path] = typer.Option(None, "-o", "--out", help="Song folder (default: <library>/<song>-<hash8>)."),
+    library: Optional[Path] = typer.Option(None, "--library", help="Library folder holding one folder per song "
+                                           "(default: $GCF_LIBRARY, gcf.toml, or ~/Music/gcf-library). -o wins."),
+    fast: Optional[bool] = typer.Option(None, "--fast/--no-fast", help="Faster separation model (lower quality)."),
+    device: Optional[str] = typer.Option(None, "--device", help="cuda (default) or cpu."),
+    sensitivity: Optional[float] = typer.Option(None, "--sensitivity", help="Onset sensitivity 0..1 (default 0.5)."),
+    extras: Optional[str] = typer.Option(None, "--extras", help="Chop extras: words and/or notes (comma-separated)."),
+    tag: Optional[bool] = typer.Option(None, "--tag/--no-tag", help="Enrich: instrument tagging (extra `tag`)."),
+    embed: Optional[bool] = typer.Option(None, "--embed/--no-embed", help="Enrich: CLAP embeddings (extra `embed`)."),
+    bit_depth: Optional[int] = typer.Option(None, "--bit-depth", help="Organized files: 24 (default) or 16."),
+    force: bool = typer.Option(False, "--force", help="Redo every stage even if finished."),
+    as_json: bool = typer.Option(False, "--json", help="JSON summary on stdout (--json=full adds the whole index)."),
+    json_full: bool = typer.Option(False, "--json-full", hidden=True),
+    plain: bool = typer.Option(False, "--plain", help="No colors or progress bars on stderr."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Only errors and the result."),
+    verbose: int = typer.Option(0, "--verbose", "-v", count=True, show_default=False, metavar="",
+                                help="More detail on stderr, tracebacks on failure."),
+    no_input: bool = typer.Option(False, "--no-input", help="Never prompt. Accepted for scripts; gcf never prompts."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan and a rough sample estimate; change nothing."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Config file to use instead of the discovered ones."),
+    cache_dir: Optional[Path] = typer.Option(None, "--cache-dir", help="Model cache folder."),
+    progress: Optional[str] = typer.Option(None, "--progress", help=_PROGRESS_HELP),
+) -> None:
+    """Separate, analyze, chop, organize (and enrich when installed) in one go. Reruns skip finished stages;
+    a failed stage is reported and the rest still runs (exit 10)."""
+    from grepchopflip.pipeline import run_from_cli
+
+    g = ctx.obj or {}
+    a = {
+        "song": song, "out": out, "library": library, "fast": fast, "device": device, "sensitivity": sensitivity,
+        "extras": extras, "tag": tag, "embed": embed, "bit_depth": bit_depth, "force": force,
+        "json": as_json or g.get("json"), "json_full": json_full or g.get("json_full"),
+        "plain": plain or g.get("plain"), "quiet": quiet or g.get("quiet"),
+        "verbose": verbose + int(g.get("verbose") or 0),
+        "dry_run": dry_run or g.get("dry_run"), "config": config or g.get("config"),
+        "cache_dir": cache_dir or g.get("cache_dir"), "progress": progress or g.get("progress"),
+    }
+    code = run_from_cli(a)
+    if code:
+        raise typer.Exit(code)
 
 
 if __name__ == "__main__":  # pragma: no cover
