@@ -26,6 +26,7 @@ beats (-1.0 = a one-beat pickup: start it one beat before the partner's cycle). 
 from __future__ import annotations
 
 import bisect
+import copy
 import itertools
 from typing import Iterable
 
@@ -33,6 +34,7 @@ TOLERANCE_MS = 2.0             # same_length / repeats: per cycle, absolute
 SAME_BARS_MAX_MS = 5.0         # guard for same_bars pairs
 FACTORS = (2, 3, 4, 8)         # whole-number repeats, smallest wins
 WHOLE_BAR_SLACK_BEATS = 0.25   # a phrase within this many beats of whole bars counts as whole bars
+PICKUP_SLACK_BEATS = 0.25      # a start later than bpb/2 - this after a downbeat is a pickup into the next bar
 CATEGORIES = ("same_bars", "same_length", "repeats_into", "holds")
 CANDIDATE_KINDS = ("loop", "phrase")
 
@@ -58,39 +60,58 @@ def eligible(a: dict, b: dict) -> bool:
 
 # ----------------------------------------------------------------------------- bar grid
 
-def _anchor(t: float, db: list[float]) -> tuple[int, float, float] | None:
-    """(bar number, downbeat time, bar length) of the downbeat nearest to `t`; extrapolated past the ends."""
-    if len(db) < 2:
-        return None
-    if t < db[0]:
-        bl = db[1] - db[0]
-        k = round((t - db[0]) / bl) if bl > 0 else 0
-        return 1 + k, db[0] + k * bl, bl
-    if t > db[-1]:
-        bl = db[-1] - db[-2]
-        k = round((t - db[-1]) / bl) if bl > 0 else 0
-        return len(db) + k, db[-1] + k * bl, bl
+def _downbeat(k: int, db: list[float]) -> float:
+    """Time of bar k's downbeat (1-based, as source_start_bar), extrapolated past the ends of the grid."""
+    if 1 <= k <= len(db):
+        return db[k - 1]
+    if k < 1:
+        return db[0] + (k - 1) * (db[1] - db[0])
+    return db[-1] + (k - len(db)) * (db[-1] - db[-2])
+
+
+def _nearest_bar(t: float, db: list[float]) -> int:
+    if t < db[0] or t > db[-1]:
+        end = 0 if t < db[0] else len(db) - 1
+        bl = db[1] - db[0] if end == 0 else db[-1] - db[-2]
+        return end + 1 + (round((t - db[end]) / bl) if bl > 0 else 0)
     j = bisect.bisect_left(db, t)
-    i = j if j < len(db) and (j == 0 or db[j] - t <= t - db[j - 1]) else j - 1
-    if t >= db[i]:
-        bl = db[i + 1] - db[i] if i + 1 < len(db) else db[i] - db[i - 1]
-    else:
-        bl = db[i] - db[i - 1] if i > 0 else db[1] - db[0]
-    return i + 1, db[i], bl
+    return (j if j < len(db) and (j == 0 or db[j] - t <= t - db[j - 1]) else j - 1) + 1
+
+
+def _phase(t: float, k: int, db: list[float], bpb: int) -> float | None:
+    """Signed offset of `t` from bar k's downbeat in beats of the bar it falls in (or the bar before it)."""
+    d = _downbeat(k, db)
+    beat = abs(_downbeat(k - 1 if t < d else k + 1, db) - d) / bpb
+    return (t - d) / beat if beat > 0 else None
+
+
+def bar_and_phase(t: float, db: list[float], bpb: int, bar: int | None = None) -> tuple[int, float | None] | None:
+    """(bar, phase_beats). Without `bar`: the nearest downbeat, but a start more than bpb/2 - 0.25 beats after it
+    belongs to the next bar (a pickup), so phase lies in (-bpb/2 - 0.25, bpb/2 - 0.25]: (-2.25, +1.75] in 4/4.
+    That keeps exact half-bar starts (+2.0 / -2.0) from being decided by float noise."""
+    if len(db) < 2 or not bpb:
+        return None
+    k = bar if bar is not None else _nearest_bar(t, db)
+    ph = _phase(t, k, db, bpb)
+    if bar is None and ph is not None:
+        if ph > bpb / 2 - PICKUP_SLACK_BEATS:
+            k += 1
+        elif ph <= -bpb / 2 - PICKUP_SLACK_BEATS:
+            k -= 1
+        ph = _phase(t, k, db, bpb)
+    return k, (round(ph, 2) + 0.0 if ph is not None else None)      # + 0.0: no "-0.0"
 
 
 def bar_span(row: dict, downbeats: list[float], beats_per_bar: int | None) -> dict | None:
     if not is_candidate(row):
         return None
     t = row.get("source_start_s")
-    a = _anchor(float(t), downbeats) if t is not None and beats_per_bar else None
     phase = None
     first = row.get("source_start_bar")
-    if a is not None and a[2] > 0:
-        bar, down, bl = a
-        phase = round((float(t) - down) / (bl / beats_per_bar), 2) + 0.0     # + 0.0: no "-0.0"
-        if row.get("kind") == "phrase" or first is None:
-            first = bar
+    loop_bar = first if row.get("kind") == "loop" else None          # loops keep their cut bar
+    a = bar_and_phase(float(t), downbeats, beats_per_bar or 0, loop_bar) if t is not None else None
+    if a is not None:
+        first, phase = a
     if row.get("kind") == "loop":
         bars = row.get("bars")
     else:
@@ -107,28 +128,20 @@ def bar_span(row: dict, downbeats: list[float], beats_per_bar: int | None) -> di
 
 # ----------------------------------------------------------------------------- pairs
 
-def _mismatch_ms(a: dict, b: dict, n: int = 1) -> float:
-    """|n * len(a) - len(b)| in ms, in frames when the sample rates agree."""
-    sa, sb = int(a.get("sample_rate") or 0), int(b.get("sample_rate") or 0)
-    if sa and sa == sb:
-        return abs(n * _frames(a) - _frames(b)) * 1000.0 / sa
-    la = _frames(a) / sa if sa else 0.0
-    lb = _frames(b) / sb if sb else 0.0
-    return abs(n * la - lb) * 1000.0
-
-
-def _within(a: dict, b: dict, n: int, limit_ms: float) -> float | None:
-    sa, sb = int(a.get("sample_rate") or 0), int(b.get("sample_rate") or 0)
-    if sa and sa == sb:                       # exact integer test in frames: 2 ms at 44.1 kHz = 88 frames
-        d = abs(n * _frames(a) - _frames(b))
-        return d * 1000.0 / sa if d * 1000.0 <= limit_ms * sa + 1e-9 else None
-    m = _mismatch_ms(a, b, n)
-    return m if m <= limit_ms + 1e-9 else None
-
-
 def _seconds(r: dict) -> float:
     sr = int(r.get("sample_rate") or 0)
     return _frames(r) / sr if sr else 0.0
+
+
+def _within(a: dict, b: dict, n: int, limit_ms: float) -> float | None:
+    """|n * len(a) - len(b)| in ms when it is <= limit_ms, else None. Integer test in frames when the sample
+    rates agree (2 ms at 44.1 kHz = 88 frames), in seconds otherwise."""
+    sa, sb = int(a.get("sample_rate") or 0), int(b.get("sample_rate") or 0)
+    if sa and sa == sb:
+        d = abs(n * _frames(a) - _frames(b))
+        return d * 1000.0 / sa if d * 1000.0 <= limit_ms * sa + 1e-9 else None
+    m = abs(n * _seconds(a) - _seconds(b)) * 1000.0
+    return m if m <= limit_ms + 1e-9 else None
 
 
 def classify_pair(a: dict, b: dict) -> tuple[str, int, float, dict, dict] | None:
@@ -242,8 +255,6 @@ def ensure(doc: dict) -> tuple[dict, bool]:
     """(document with partners, True when they had to be computed in memory: an index older than 1.2)."""
     if has_layers(doc):
         return doc, False
-    import copy
-
     return attach(copy.deepcopy(doc)), True
 
 

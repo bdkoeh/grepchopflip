@@ -331,14 +331,7 @@ def read_state(song: Path) -> dict:
 
 
 def write_json_if_changed(p: Path, doc: dict, **dump) -> bool:
-    text = json.dumps(doc, **dump) + "\n"
-    try:
-        if p.read_text(encoding="utf-8") == text:
-            return False
-    except OSError:
-        pass
-    atomic_write(p, text)
-    return True
+    return write_text_if_changed(p, json.dumps(doc, **dump) + "\n")
 
 
 # ----------------------------------------------------------------------------- index
@@ -492,6 +485,7 @@ def write_index(song: Path, doc: dict) -> bool:
     p = song / INDEX_NAME
     old = read_json(p)
     doc = carry_over(old, doc)
+    doc = layers.attach(doc)      # after carry_over: the span choice reads is_dedup_representative
     if old and {k: v for k, v in old.items() if k != "created"} == {k: v for k, v in doc.items() if k != "created"}:
         return False
     return write_text_if_changed(p, index_text(doc))

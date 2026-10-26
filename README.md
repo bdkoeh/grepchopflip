@@ -62,7 +62,9 @@ lengths fit it, so they can be played on top of each other without drifting. **R
 Each entry is `{id, factor, drift_ms}`: `factor` is how many repeats (1 for same bars / same length),
 `drift_ms` the length mismatch per cycle. One-shots and words have `layers_with: null`. `bar_span` gives
 `{first, bars, phase_beats}`; a phrase with `phase_beats: -1.0` starts one beat before the bar (a pickup), so
-start it a beat early. Top-level `layers` records the tolerances and maps each bar span to its loop id per
-stem. Partners are recomputed by `gcf organize` / `gcf index` (no audio is read); ids come from the index,
+start it a beat early. A phrase belongs to its nearest downbeat, except that a start more than half a bar
+minus a quarter beat after a downbeat counts as a pickup into the next bar: in 4/4 `phase_beats` lies in
+(-2.25, +1.75], and an exact half-bar start reads -2.0. Top-level `layers` records the tolerances and maps each
+bar span to its loop id per stem (`complete`: every stem that has loops of that length is present). Partners are recomputed by `gcf organize` / `gcf index` (no audio is read); ids come from the index,
 never guess them. A loop player that loops two files independently drifts by up to `drift_ms` per cycle;
 retrigger per pattern (as the MPC does) or trim the partner to the exact multiple.

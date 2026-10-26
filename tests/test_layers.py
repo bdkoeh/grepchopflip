@@ -82,6 +82,35 @@ def test_golden_bar_spans_and_summary():
         ]}
 
 
+def test_pickup_rule_at_the_half_bar():
+    """Phrases: nearest downbeat, but more than bpb/2 - 0.25 beats after it is a pickup into the next bar."""
+    db, bpb = GRID["downbeats_s"], 4                                        # bar k starts at 2(k-1) s, beat 0.5 s
+    assert L.bar_and_phase(3.0, db, bpb) == (3, -2.0)                       # exact half bar: -2.0, never +2.0
+    assert L.bar_and_phase(3.0 + 1e-9, db, bpb) == (3, -2.0)
+    assert L.bar_and_phase(3.0 - 1e-9, db, bpb) == (3, -2.0)
+    assert L.bar_and_phase(2.875, db, bpb) == (2, 1.75)                     # +1.75 stays
+    assert L.bar_and_phase(2.88, db, bpb) == (3, -2.24)                     # just past: next bar
+    assert L.bar_and_phase(3.5, db, bpb) == (3, -1.0)
+    assert L.bar_and_phase(-0.5, db, bpb) == (1, -1.0)                      # before the grid: extrapolated
+    assert L.bar_and_phase(30.25, db, bpb) == (16, 0.5)                     # after the last downbeat (30 s)
+    assert L.bar_and_phase(31.0, db, bpb) == (17, -2.0)                     # half a bar past it: extrapolated bar 17
+    assert L.bar_and_phase(1.0, db, bpb, bar=2) == (2, -2.0)                # loops keep their cut bar
+    phr = row("p", "other", "phrase", 88200, 3.0, bar=2, length_beats=4.0)
+    assert L.bar_span(phr, db, bpb) == {"first": 3, "bars": 1, "phase_beats": -2.0}
+    loop = row("l", "drums", "loop", 88200, 1.99, bar=2, bars=1)            # cut at bar 2, 10 ms pre-roll
+    assert L.bar_span(loop, db, bpb) == {"first": 2, "bars": 1, "phase_beats": -0.02}
+    assert L.bar_span(phr, [], bpb) == {"first": 2, "bars": 1, "phase_beats": None}   # no grid
+
+
+def test_span_prefers_kept_then_representative():
+    rows = [row("z_rep", "drums", "loop", 88200, 0.0, bar=1, bars=1, rep=True),
+            row("a_dup", "drums", "loop", 88200, 0.0, bar=1, bars=1, rep=False),
+            row("a_rev", "bass", "loop", 88200, 0.0, bar=1, bars=1, review=True),
+            row("b_kept", "bass", "loop", 88200, 0.0, bar=1, bars=1)]
+    _, summ = L.compute(rows, GRID)
+    assert summ["spans"][0]["loops"] == {"bass": "b_kept", "drums": "z_rep"}
+
+
 def test_drift_arithmetic_and_tolerance_edges():
     a = row("a", "drums", "loop", 44100, 0.0, bar=1, bars=1)
     assert L.classify_pair(a, row("b", "bass", "loop", 44100 + 88, 10.0, bar=6, bars=1))[:3] == ("same_length", 1, 2.0)
@@ -274,6 +303,31 @@ def test_enrich_keeps_the_partner_fields(song, monkeypatch):
     (song / "index.json").write_text(json.dumps(old), encoding="utf-8")
     enr.enrich(song, workers=1)
     assert _index(song)["layers"] == before["layers"] and validate_index_file(song)["valid"]
+
+
+def test_cached_enrich_upgrades_an_index_without_partners(song, monkeypatch):
+    """A 1.1 index whose stored input key still matches: enrich stays cached but adds the partners."""
+    from grepchopflip import enrich as enr
+    from grepchopflip.enrich import embed_clap, tagging_ast
+
+    monkeypatch.setattr(tagging_ast, "available", lambda: False)
+    monkeypatch.setattr(embed_clap, "available", lambda: False)
+    enr.enrich(song, workers=1)
+    want = _index(song)
+    old = copy.deepcopy(want)
+    old["schema_version"] = "1.1"
+    del old["layers"]
+    for x in old["samples"]:
+        del x["bar_span"], x["layers_with"]
+    (song / "index.json").write_text(json.dumps(old), encoding="utf-8")
+    r = enr.enrich(song, workers=1)
+    assert r["cached"] is True
+    got = _index(song)
+    assert got["schema_version"] == "1.2" and got["layers"] == want["layers"]
+    assert {x["id"]: x["layers_with"] for x in got["samples"]} == {x["id"]: x["layers_with"] for x in want["samples"]}
+    assert got["stages"]["enrich"] == want["stages"]["enrich"] and validate_index_file(song)["valid"]
+    raw = (song / "index.json").read_bytes()
+    assert enr.enrich(song, workers=1)["cached"] is True and (song / "index.json").read_bytes() == raw
 
 
 # ----------------------------------------------------------------------------- gcf layers

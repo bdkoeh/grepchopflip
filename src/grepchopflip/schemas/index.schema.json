@@ -26,7 +26,7 @@
     "schema_version": {"enum": ["1.0", "1.1", "1.2"]},
     "layers": {
       "type": "object",
-      "description": "1.2 (slice 12): how layering partners were found, and the bar spans with loops per stem. `stems` are the stems that produce loops in this folder; a span is `complete` when every stem that loops at that bar count has a loop there; `phrases` are whole-bar phrases covering exactly that span (they may start on a pickup, see their bar_span.phase_beats).",
+      "description": "1.2 (slice 12): how layering partners were found, and the bar spans with loops per stem. `stems` are the stems that produce loops in this folder. A span is `complete` when every stem that has loops of that bar count anywhere in the song has a loop at this span (bass, which loops only at 1 and 2 bars, is not required at 4). `phrases` are the phrases whose bar_span has the same `first` and `bars`: their length is whole bars within 0.25 beat, and their start may be up to about 2 beats off the downbeat (see their bar_span.phase_beats; -1.0 = starts a beat early).",
       "additionalProperties": false,
       "required": ["tolerance_ms", "same_bars_max_ms", "factors", "stems", "spans"],
       "properties": {
@@ -262,7 +262,7 @@
         "tags": {"type": "array", "items": {"type": "string"}, "description": "Extra `tag`: top AudioSet labels (probability >= 0.1)."},
         "bar_span": {
           "type": ["object", "null"],
-          "description": "1.2: loops and phrases only. `first` = the bar the sample belongs to, `bars` = its whole-bar length (null for a phrase that is not whole bars), `phase_beats` = signed start offset from that bar's downbeat in beats (-1.0 = a one-beat pickup; null without a grid).",
+          "description": "1.2: loops and phrases only. `first` = the bar the sample belongs to, `bars` = its whole-bar length (null for a phrase that is not whole bars), `phase_beats` = signed start offset from that bar's downbeat in beats (-1.0 = a one-beat pickup; null without a grid). Loops use their cut bar (`source_start_bar`). Phrases use the nearest downbeat, except that a start more than beats_per_bar/2 - 0.25 beats after a downbeat counts as a pickup into the next bar, so phase_beats lies in (-2.25, +1.75] in 4/4 and an exact half-bar start reads -2.0.",
           "additionalProperties": false,
           "required": ["first", "bars", "phase_beats"],
           "properties": {

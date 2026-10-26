@@ -91,6 +91,7 @@ function stopAll() {{
   if (cur) {{ try {{ cur.stop(); }} catch (e) {{}} cur = null; }}
   voices.forEach(v => {{ try {{ v.src.stop(); }} catch (e) {{}} }});
   voices.clear();
+  generation++; pending.clear(); padded.clear();       // loads still in flight are dropped when they land
   pads.forEach(p => p.classList.remove('on', 'looping'));
   curIdx = -1;
   setAnchor(-1);
@@ -152,8 +153,18 @@ function fitted(buf, period, src) {{
   }}
   return padded.get(key);
 }}
+const pending = new Map();                          // pad index -> token while its file loads
+let generation = 0;                                 // Esc / Loop off bump it: a load that lands later is dropped
 async function startVoice(i, src) {{
-  const buf = await loadBuffer(src);
+  const token = {{}}, gen = generation;
+  pending.set(i, token);
+  pads[i].classList.add('looping');
+  const stale = () => gen !== generation || pending.get(i) !== token;
+  let buf;
+  try {{ buf = await loadBuffer(src); }}
+  catch (e) {{ if (stale()) return; pending.delete(i); throw e; }}
+  if (stale()) return;                              // cancelled (pad clicked again, Esc, Loop off) while loading
+  pending.delete(i);
   const s = ctx.createBufferSource();
   s.loop = true; s.connect(ctx.destination);
   const m = master();
@@ -185,6 +196,7 @@ function play(i) {{
   const a = document.getElementById('a' + i);
   if (loopBox.checked && served) {{
     if (voices.has(i)) {{ stopVoice(i); return; }}
+    if (pending.has(i)) {{ pending.delete(i); pads[i].classList.remove('looping'); return; }}   // cancel a load
     startVoice(i, a.getAttribute('src').split('?')[0]).catch(() => {{
       stopAll(); a.loop = true; a.play(); curIdx = i; pads[i].classList.add('looping'); setAnchor(i); }});
     return;
@@ -233,8 +245,8 @@ filt.oninput = refresh;
 partBox.onchange = () => {{ document.getElementById('partlab').classList.toggle('on', partBox.checked); refresh(); }};
 refresh();
 addEventListener('keydown', e => {{
+  if (e.key === 'Escape') {{ stopAll(); return; }}      // also while typing in the filter box
   if (e.target === filt) return;
-  if (e.key === 'Escape') {{ stopAll(); return; }}
   if (e.key.toLowerCase() === 'l' && !e.repeat) {{ loopBox.checked = !loopBox.checked; loopBox.onchange(); return; }}
   if (e.key.toLowerCase() === 'a' && !e.repeat) {{ partBox.checked = !partBox.checked; partBox.onchange(); return; }}
   const k = keys.indexOf(e.key.toLowerCase());
