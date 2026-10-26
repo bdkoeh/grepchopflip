@@ -129,16 +129,10 @@ def _measure_all(jobs: list[tuple[str, str, bool]], workers: int | None) -> list
 
 # ----------------------------------------------------------------------------- state and small helpers
 
-def _read_json(p: Path) -> dict:
-    try:
-        d = json.loads(p.read_text(encoding="utf-8"))
-        return d if isinstance(d, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
 def _read_state(song: Path) -> dict:
-    s = _read_json(song / STATE_NAME)
+    from grepchopflip.organize import read_json   # organize imports this package: import lazily
+
+    s = read_json(song / STATE_NAME)
     if s.get("version") != VERSION:
         s = {}
     s.setdefault("version", VERSION)
@@ -226,7 +220,7 @@ def _apply_review_flags(song: Path, rows: list[dict], verdicts: dict[str, dict |
         touched.add(p)
         changed += 1
     for p in touched:
-        org._atomic_write(p, json.dumps(docs[p], indent=2))
+        org.atomic_write(p, json.dumps(docs[p], indent=2))
     return changed
 
 
@@ -252,7 +246,7 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
     song = Path(song_dir)
     if not song.is_dir():
         raise InputError(f"not a folder: {song}")
-    doc = _read_json(song / INDEX_NAME)
+    doc = org.read_json(song / INDEX_NAME)
     if not doc:
         raise InputError(f"no readable {INDEX_NAME} in {song}; run `gcf organize` first")
     if doc.get("schema_version") not in ("1.0", "1.1") or not isinstance(doc.get("samples"), list):
@@ -264,7 +258,7 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
     missing = [r["path"] for r in doc["samples"] if not (song / r["path"]).is_file()]
     if missing:
         raise InputError(f"{len(missing)} indexed file(s) missing (first: {missing[0]}); run `gcf index` first")
-    for p in song.rglob("*.gcf-chunks"):         # an interrupted chunk write
+    for p in song.rglob("*" + wavchunks.TMP_SUFFIX):         # an interrupted chunk write
         p.unlink(missing_ok=True)
 
     skipped: dict[str, str] = {}
@@ -280,7 +274,7 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
     st = doc.get("stages", {}).get("enrich") or {}
     if (not force and st.get("done") and st.get("input_key") == _input_key(doc["samples"], opts)
             and (not embed_on or (song / embed_clap.FILE).is_file())
-            and all(org._sha256(song / r["path"]) == r["sha256"] for r in doc["samples"])):
+            and all(org.file_sha256(song / r["path"]) == r["sha256"] for r in doc["samples"])):
         c = doc.get("counts") or counts(doc["samples"])
         return {"song_dir": str(song), "index": INDEX_NAME, "cached": True, "samples": c["total"],
                 "representatives": c["representatives"], "review": c["review"], "counts": c,
@@ -327,11 +321,27 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
         flagged = _apply_review_flags(song, rows, verdicts)
         if flagged:
             log.info("classifier: %d record(s) changed review status; re-placing them", flagged)
+            old_by_id = {r["id"]: digests[r["path"]] for r in rows}
             org.organize(song, bit_depth=int(doc.get("params", {}).get("bit_depth") or 24))
-            doc = _read_json(song / INDEX_NAME)
+            doc = org.read_json(song / INDEX_NAME)
             rows = doc["samples"]
             digests = {r["path"]: wavchunks.audio_digest(song / r["path"]) for r in rows}
-            verdicts = {r["path"]: tagging_ast.verdict(r["class"], state["tags"][digests[r["path"]]]) for r in rows}
+            # a re-rendered file may not be byte-identical: tags follow the sample id, measurements are redone
+            for r in rows:
+                d, old_d = digests[r["path"]], old_by_id.get(r["id"])
+                if d not in state["tags"] and old_d in state["tags"]:
+                    state["tags"][d] = state["tags"][old_d]
+            redo = [r for r in rows if digests[r["path"]] not in fps or digests[r["path"]] not in state["features"]]
+            if redo:
+                again = _measure_all([(str(song / r["path"]), r["kind"], digests[r["path"]] not in state["features"])
+                                      for r in redo], workers)
+                for r, (feats, fp) in zip(redo, again):
+                    fps[digests[r["path"]]] = fp
+                    if feats is not None:
+                        state["features"][digests[r["path"]]] = feats
+                steps["character"]["measured"] += sum(1 for f, _ in again if f is not None)
+            verdicts = {r["path"]: (tagging_ast.verdict(r["class"], state["tags"][digests[r["path"]]])
+                                    if digests[r["path"]] in state["tags"] else None) for r in rows}
         agreement: dict[str, dict] = {}
         for r in rows:
             v = verdicts[r["path"]]
@@ -344,8 +354,7 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
             a["flagged"] += v["disagrees"]
         steps["tag"] = {"status": "done", "tagged": len(todo), "review_changes": flagged,
                         "agreement": dict(sorted(agreement.items()))}
-        tag_models = {"name": AST.repo, "revision": AST.revision, "license": AST.license,
-                      "source": f"https://huggingface.co/{AST.repo}"}
+        tag_models = AST.record()
         timings["tag"] = round(time.perf_counter() - t, 2)
     elif "tag" not in steps:
         steps["tag"] = {"status": "skipped" if tag else "off", "reason": skipped.get("tag", "--no-tag")}
@@ -377,7 +386,7 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
         v = _chunk_values(r, bpb)
         if _write_wav_chunks(p, v, r["sample_rate"]):
             written += 1
-        new_sha = org._sha256(p)
+        new_sha = org.file_sha256(p)
         if new_sha != r["sha256"]:
             sha_moves[r["path"]] = (r["sha256"], new_sha)
             r["sha256"] = new_sha
@@ -386,12 +395,27 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
     steps["chunks"] = {"written": written, "unchanged": len(rows) - written}
     timings["chunks"] = round(time.perf_counter() - t, 2)
 
+    # ---- keep organize's cache valid right away (before the index): the files changed only by the
+    # appended chunks, so an interruption here never makes the next `gcf organize` re-render them
+    if sha_moves:
+        ostate = org.read_state(song)
+        by_rel = {rel: e for rel, e in ostate["files"].items()}
+        for rel, (old_sha, new_sha) in sha_moves.items():
+            e = by_rel.get(rel)
+            if e and e.get("sha256") == old_sha:
+                e["sha256"] = new_sha
+                if old_sha in ostate["levels"]:
+                    ostate["levels"][new_sha] = ostate["levels"][old_sha]
+        live = {e.get("sha256") for e in ostate["files"].values()}
+        ostate["levels"] = {k: v for k, v in sorted(ostate["levels"].items()) if k in live}
+        org.write_json_if_changed(song / org.STATE_NAME, ostate, indent=1, sort_keys=True)
+
     # ---- embeddings
     emb_models = None
     refs: list[dict | None] = [None] * len(rows)
     if embed_on:
         t = time.perf_counter()
-        meta = _read_json(song / embed_clap.META)
+        meta = org.read_json(song / embed_clap.META)
         old_rows = meta.get("rows") if meta.get("model") == CLAP.repo and meta.get("revision") == CLAP.revision else None
         old = {}
         if old_rows and not force and (song / embed_clap.FILE).is_file():
@@ -430,10 +454,9 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
             tmp = out.with_name(out.name + ".tmp.npy")
             np.save(tmp, mat)
             os.replace(tmp, out)
-            org._write_json_if_changed(song / embed_clap.META, new_meta, indent=1)
+            org.write_json_if_changed(song / embed_clap.META, new_meta, indent=1)
         refs = [{"file": embed_clap.FILE, "row": i} for i in range(len(rows))]
-        emb_models = {"name": CLAP.repo, "revision": CLAP.revision, "license": CLAP.license,
-                      "source": f"https://huggingface.co/{CLAP.repo}"}
+        emb_models = CLAP.record()
         steps["embed"] = {"status": "done", "embedded": len(todo), "file": embed_clap.FILE}
         timings["embed"] = round(time.perf_counter() - t, 2)
     elif "embed" not in steps:
@@ -467,8 +490,10 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
     doc["counts"] = counts(rows)
     doc["enrichment"] = {
         "version": VERSION,
-        "character": {"method": "AudioCommons timbral_models v0.4 port (Apache-2.0); words from per-song "
-                                "percentiles within each class", "percentiles": [character.LOW_PCT, character.HIGH_PCT],
+        "character": {"method": "brightness: AudioCommons timbral_models v0.4 port; hardness: the AudioCommons "
+                                "v0.4 regression with its mid-band loudness term replaced by a constant (MIDBAND_REF); "
+                                "Apache-2.0, see LICENSES/AudioCommons-Apache-2.0.txt; words from per-song "
+                                "percentiles within each class", "midband_ref": character.MIDBAND_REF, "percentiles": [character.LOW_PCT, character.HIGH_PCT],
                       "min_pool": character.MIN_POOL, "thresholds": thr},
         "dedup": {"method": "RMS dB distance of level-normalised log-mel envelopes, leader clustering, loudest "
                             "first; same class and review status only",
@@ -488,26 +513,12 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
         "seconds": timings}}
     org.write_index(song, doc)
 
-    # ---- keep organize's cache valid: the files changed only by the appended chunks
-    if sha_moves:
-        ostate = org.read_state(song)
-        by_rel = {rel: e for rel, e in ostate["files"].items()}
-        for rel, (old_sha, new_sha) in sha_moves.items():
-            e = by_rel.get(rel)
-            if e and e.get("sha256") == old_sha:
-                e["sha256"] = new_sha
-                if old_sha in ostate["levels"]:
-                    ostate["levels"][new_sha] = ostate["levels"][old_sha]
-        live = {e.get("sha256") for e in ostate["files"].values()}
-        ostate["levels"] = {k: v for k, v in sorted(ostate["levels"].items()) if k in live}
-        org._write_json_if_changed(song / org.STATE_NAME, ostate, indent=1, sort_keys=True)
-
     # ---- the cache: only what the current samples use
     live_d = set(digests.values())
     state = {"version": VERSION,
              "features": {d: v for d, v in sorted(state["features"].items()) if d in live_d},
              "tags": {d: v for d, v in sorted(state["tags"].items()) if d in live_d}}
-    org._write_json_if_changed(song / STATE_NAME, state, indent=0, sort_keys=True)
+    org.write_json_if_changed(song / STATE_NAME, state, indent=0, sort_keys=True)
 
     c = doc["counts"]
     return {"song_dir": str(song), "index": INDEX_NAME, "cached": False, "samples": c["total"],

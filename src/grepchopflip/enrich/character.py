@@ -2,7 +2,8 @@
 
 `brightness` is a port of AudioCommons timbral_models `timbral_brightness` v0.4 and `hardness` follows
 `timbral_hardness` v0.4 (both Copyright 2018 Andy Pearce, Institute of Sound Recording, University of
-Surrey; Apache License 2.0, https://github.com/AudioCommons/timbral_models). Changes from the originals:
+Surrey; Apache License 2.0, https://github.com/AudioCommons/timbral_models; licence text and the list of
+changes in LICENSES/AudioCommons-Apache-2.0.txt). Changes from the originals:
 inputs are arrays (no file reading), the clip is treated as starting at its onset (one-shots are cut on
 the onset; loops and phrases use librosa onsets instead of AudioCommons' own onset picker), and the
 hardness regression's mid-band Zwicker loudness term is replaced by a fixed reference value

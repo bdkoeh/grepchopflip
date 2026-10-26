@@ -118,6 +118,41 @@ def test_changed_sample_set_drops_enrichment(song):
     assert enr.enrich(song, workers=1)["cached"] is False
 
 
+def test_validate_checks_counts_against_samples(song):
+    enr.enrich(song, workers=1)
+    doc = _index(song)
+    doc["counts"]["classes"]["Kick"]["representatives"] += 1
+    (song / "index.json").write_text(json.dumps(doc), encoding="utf-8")
+    v = validate_index_file(song)
+    assert not v["valid"] and any(p.startswith("counts:") for p in v["problems"])
+
+
+def test_rerendered_flagged_file_is_measured_again(song, monkeypatch):
+    """organize re-renders the flagged hit with different bytes: its measurements must be redone, not looked up."""
+    real_write = org.write_clip
+
+    def altered(src, tmp, *a, **k):
+        fi = real_write(src, tmp, *a, **k)
+        import soundfile as sf
+
+        data, sr = sf.read(str(tmp), dtype="int32", always_2d=True)
+        data[0, 0] ^= 1 << 8                                     # one LSB of the 24-bit sample changes
+        with sf.SoundFile(str(tmp), "w", samplerate=sr, channels=data.shape[1], subtype="PCM_24", format="WAV") as f:
+            f.write(data)
+        fi["sha256"] = org.file_sha256(tmp)
+        return fi
+
+    monkeypatch.setattr(org, "write_clip", altered)
+    monkeypatch.setattr(tagging_ast, "available", lambda: True)
+    monkeypatch.setattr(tagging_ast, "Tagger", _fake_tagger([0.001, 0.9, 0.01, 0.01, 0.001, 0.001, 0.5]))
+    r = enr.enrich(song, workers=1)
+    assert r["problems"] == [] and r["steps"]["character"]["measured"] > 16    # the moved files were measured again
+    s = _by_id(song)["drums_oneshot_0001"]
+    assert s["path"].startswith("review/") and s["features"]["brightness"] is not None
+    assert s["classifier_class"] == "Snare" and s["dedup_group"]              # tags followed the sample id
+    assert validate_index_file(song)["valid"]
+
+
 def test_old_1_0_index_still_validates(song):
     doc = _index(song)
     doc["schema_version"] = "1.0"
@@ -247,6 +282,8 @@ def test_cli_enrich_prints_counts_and_hint(song):
     assert "is_dedup_representative" in res.stdout
     res = CliRunner().invoke(app, ["enrich", str(song), "--json"])
     assert res.exit_code == 0 and json.loads(res.stdout)["cached"] is True
+    res = CliRunner().invoke(app, ["enrich", str(song), "--no-tag", "--embed", "--json"])
+    assert res.exit_code == 0 and json.loads(res.stdout)["cached"] is True   # extras absent: same result, nothing redone
 
 
 def test_cli_enrich_exit_codes(tmp_path):

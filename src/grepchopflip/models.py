@@ -209,7 +209,6 @@ CLAP = HFModel(
     ),
     license="Apache-2.0", extra="embed", size_mb=741,
 )
-HF_MODELS: dict[str, HFModel] = {m.key: m for m in (AST, CLAP)}
 EXTRA_MODELS: dict[str, tuple[HFModel, ...]] = {"tag": (AST,), "embed": (CLAP,)}
 
 
@@ -249,5 +248,5 @@ def pull(extras: list[str] | None = None, all_models: bool = False) -> list[dict
             was = hf_cached(w)
             d = ensure_hf(w)
             out.append({"model": w.repo, "extra": w.extra, "license": w.license, "revision": w.revision,
-                        "path": str(d), "cached": was})
+                        "size_mb": w.size_mb, "path": str(d), "cached": was})
     return out

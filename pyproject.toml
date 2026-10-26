@@ -4,7 +4,7 @@ version = "0.1.0.dev0"
 description = "grep | chop | flip: turn one song into a library of well-cut, labeled samples with a JSON index. Built for agents to call."
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "LICENSES/*"]   # LICENSES/: Apache-2.0 text for code adapted from AudioCommons
 requires-python = ">=3.12,<3.13"
 authors = [{ name = "Bob" }]
 keywords = ["audio", "samples", "stem-separation", "beat-making", "cli", "agent"]

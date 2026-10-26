@@ -21,6 +21,7 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
+TMP_SUFFIX = ".gcf-chunks"        # a rewrite in progress beside its file (organize and enrich sweep these)
 SMPL = b"smpl"
 ACID = b"acid"
 
@@ -136,10 +137,14 @@ def write_chunks(path: Path, new: dict[bytes, bytes]) -> bool:
     out = b"RIFF" + struct.pack("<I", 4 + len(body)) + b"WAVE" + bytes(body)
     if out == blob:
         return False
-    tmp = path.with_name(path.name + ".gcf-chunks")
-    with open(tmp, "wb") as fh:
-        fh.write(out)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    tmp = path.with_name(path.name + TMP_SUFFIX)
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(out)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return True

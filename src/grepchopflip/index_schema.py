@@ -63,5 +63,10 @@ def validate_index_file(song_dir: Path) -> dict:
     problems = schema_errors(doc)
     if isinstance(doc, dict) and isinstance(doc.get("samples"), list):
         problems += path_errors(Path(song_dir), doc)
+        if isinstance(doc.get("counts"), dict) and not problems:
+            from grepchopflip.enrich import counts
+
+            if doc["counts"] != counts(doc["samples"]):
+                problems.append("counts: do not match the samples; run `gcf index` (or `gcf enrich`) again")
     n = len(doc.get("samples", [])) if isinstance(doc, dict) and isinstance(doc.get("samples"), list) else 0
     return {"valid": not problems, "problems": problems, "samples": n}

@@ -124,3 +124,28 @@ def test_rejects_non_wave(tmp_path):
     q.write_bytes(q.read_bytes()[:200])
     with pytest.raises(wc.WavChunkError):
         _add(q)
+
+
+def test_failed_write_leaves_no_temp_file(tmp_path, monkeypatch):
+    p = _wav(tmp_path / "x.wav")
+    before = p.read_bytes()
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(wc.os, "replace", boom)
+    with pytest.raises(OSError):
+        _add(p)
+    assert p.read_bytes() == before and not list(tmp_path.glob("*" + wc.TMP_SUFFIX))
+
+
+def test_organize_sweeps_chunk_leftovers(tmp_path):
+    from orgfix import make_song
+    from grepchopflip import organize as org
+
+    song = make_song(tmp_path / "song")
+    org.organize(song)
+    left = song / "oneshots/kick/Kick_02.wav.gcf-chunks"
+    left.write_bytes(b"half")
+    org.organize(song)
+    assert not left.exists()

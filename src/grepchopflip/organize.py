@@ -34,6 +34,7 @@ import soundfile as sf
 from grepchopflip import __version__
 from grepchopflip.enrich import EMPTY_FIELDS, carry_over
 from grepchopflip.enrich import counts as enrich_counts
+from grepchopflip.enrich.wavchunks import TMP_SUFFIX as CHUNK_TMP_SUFFIX
 from grepchopflip.errors import InputError
 from grepchopflip.index_schema import INDEX_NAME, INDEX_SCHEMA_VERSION
 from grepchopflip.loudness import Levels, measure
@@ -52,7 +53,7 @@ class PartialOrganize(OSError):
     """organize failed after some files were already placed (the records still point at the originals)."""
 
 
-def _atomic_write(p: Path, text: str) -> None:
+def atomic_write(p: Path, text: str) -> None:
     tmp = p.with_name(p.name + ".tmp")
     with open(tmp, "w", encoding="utf-8", newline="") as fh:
         fh.write(text)
@@ -74,8 +75,9 @@ def _deletable(song: Path, rel: object) -> bool:
 
 def _sweep_leftovers(song: Path) -> None:
     """Undo an interrupted run: drop half-written files, put parked originals back."""
-    for p in song.rglob("*" + TMP_SUFFIX):
-        p.unlink(missing_ok=True)
+    for suffix in (TMP_SUFFIX, CHUNK_TMP_SUFFIX):     # CHUNK_TMP_SUFFIX: an interrupted `gcf enrich` chunk write
+        for p in song.rglob("*" + suffix):
+            p.unlink(missing_ok=True)
     for p in song.rglob("*" + OLD_SUFFIX):
         os.replace(p, p.with_name(p.name[: -len(OLD_SUFFIX)]))
 
@@ -117,7 +119,7 @@ class Context:
         return str(self.source.get("name") or self.song_dir.name)
 
 
-def _read_json(p: Path) -> dict:
+def read_json(p: Path) -> dict:
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
         return d if isinstance(d, dict) else {}
@@ -145,8 +147,8 @@ def load_records(docs: dict[Path, dict]) -> list[Rec]:
 
 
 def load_context(song: Path) -> Context:
-    source = _read_json(song / "source.json")
-    ana = _read_json(song / "analysis.json")
+    source = read_json(song / "source.json")
+    ana = read_json(song / "analysis.json")
     bpm = ana.get("bpm") if ana.get("tempo_reliable") and ana.get("bpm") else None
     key, mode = ana.get("key"), ana.get("mode")
     if not (key and mode):
@@ -252,7 +254,7 @@ def plan_names(recs: list[Rec], ctx: Context) -> dict[int, tuple[dict, str]]:
 
 # ----------------------------------------------------------------------------- writing audio
 
-def _sha256(p: Path) -> str:
+def file_sha256(p: Path) -> str:
     h = hashlib.sha256()
     with open(p, "rb") as fh:
         for block in iter(lambda: fh.read(1 << 20), b""):
@@ -295,7 +297,7 @@ def write_clip(src: Path, tmp: Path, bit_depth: int, title: str, artist: str, co
         # libsndfile writes the INFO chunk with the first audio write: strings must be set before it
         f.title, f.artist, f.comment, f.software = title, artist, comment, f"gcf {__version__}"
         f.write(out)
-    return {"sha256": _sha256(tmp), "levels": measure(floats, int(sr)), "frames": int(len(data)),
+    return {"sha256": file_sha256(tmp), "levels": measure(floats, int(sr)), "frames": int(len(data)),
             "channels": int(data.shape[1]), "sample_rate": int(sr), "bit_depth": bit_depth}
 
 
@@ -305,7 +307,7 @@ def _file_bits(p: Path) -> int:
 
 def describe_file(p: Path, levels_cache: dict[str, dict]) -> dict:
     """Facts of an existing clip (hash, levels via the cache keyed by hash, format)."""
-    sha = _sha256(p)
+    sha = file_sha256(p)
     info = sf.info(str(p))
     bits = _file_bits(p)
     lv = levels_cache.get(sha)
@@ -319,21 +321,21 @@ def describe_file(p: Path, levels_cache: dict[str, dict]) -> dict:
 # ----------------------------------------------------------------------------- state
 
 def read_state(song: Path) -> dict:
-    s = _read_json(song / STATE_NAME)
+    s = read_json(song / STATE_NAME)
     s.setdefault("files", {})
     s.setdefault("levels", {})
     s["pending"] = [x for x in s.get("pending") or [] if isinstance(x, str)]
     return s
 
 
-def _write_json_if_changed(p: Path, doc: dict, **dump) -> bool:
+def write_json_if_changed(p: Path, doc: dict, **dump) -> bool:
     text = json.dumps(doc, **dump) + "\n"
     try:
         if p.read_text(encoding="utf-8") == text:
             return False
     except OSError:
         pass
-    _atomic_write(p, text)
+    atomic_write(p, text)
     return True
 
 
@@ -438,11 +440,11 @@ def write_index(song: Path, doc: dict) -> bool:
     """Write index.json unless it is identical apart from `created` (then the old file, and its time, stay).
     A rebuild keeps the previous `gcf enrich` results when the samples are unchanged (enrich.carry_over)."""
     p = song / INDEX_NAME
-    old = _read_json(p)
+    old = read_json(p)
     doc = carry_over(old, doc)
     if old and {k: v for k, v in old.items() if k != "created"} == {k: v for k, v in doc.items() if k != "created"}:
         return False
-    return _write_json_if_changed(p, doc, indent=2, ensure_ascii=False)
+    return write_json_if_changed(p, doc, indent=2, ensure_ascii=False)
 
 
 def rebuild_index(song_dir: Path) -> dict:
@@ -464,7 +466,7 @@ def rebuild_index(song_dir: Path) -> dict:
         rows.append(sample_row(r.chop, facts(r.chop, ctx), r.path, fi, str(r.chop.get("id"))))
     organized = bool(rows) and all(not r["path"].startswith("chops/") for r in rows)
     bit_depth = int(state.get("bit_depth") or (rows[0]["bit_depth"] if rows else 24))
-    old = _read_json(song / INDEX_NAME)
+    old = read_json(song / INDEX_NAME)
     doc = make_index(song, ctx, docs, rows, organized, bit_depth, created=None)
     changed = write_index(song, doc)
     return {"song_dir": str(song), "index": INDEX_NAME, "samples": len(rows), "changed": changed,
@@ -527,7 +529,7 @@ def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
         f["_meta"] = meta
         ent = prev_files.get(r.path)
         if (not force and r.path == dst_rel and ent and ent.get("meta") == meta
-                and ent.get("bit_depth") == bit_depth and ent.get("sha256") == _sha256(src)):
+                and ent.get("bit_depth") == bit_depth and ent.get("sha256") == file_sha256(src)):
             reused.append((r, dst_rel, f, describe_file(src, state["levels"])))
         else:
             todo.append((r, src, dst_rel, f))
@@ -582,7 +584,7 @@ def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
     for p, d in docs.items():
         after = json.dumps(d, indent=2)
         if p.read_text(encoding="utf-8") != after:
-            _atomic_write(p, after)
+            atomic_write(p, after)
             changed_docs += 1
 
     # state and index; the files to delete are listed in the state first, so a crash cannot orphan them
@@ -597,7 +599,7 @@ def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
         rows.append(sample_row(r.chop, f, dst_rel, fi, str(r.chop.get("id"))))
     new_state = {"version": 1, "bit_depth": bit_depth, "files": dict(sorted(files.items())),
                  "levels": dict(sorted(levels.items())), "pending": [x for x in pending if _deletable(song, x)]}
-    state_changed = _write_json_if_changed(song / STATE_NAME, new_state, indent=1, sort_keys=True)
+    state_changed = write_json_if_changed(song / STATE_NAME, new_state, indent=1, sort_keys=True)
     doc = make_index(song, ctx, docs, rows, organized=not problems, bit_depth=bit_depth)
     index_changed = write_index(song, doc)
 
@@ -612,7 +614,7 @@ def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
         (song / (x + OLD_SUFFIX)).unlink(missing_ok=True)
     if new_state["pending"]:
         new_state["pending"] = []
-        _write_json_if_changed(song / STATE_NAME, new_state, indent=1, sort_keys=True)
+        write_json_if_changed(song / STATE_NAME, new_state, indent=1, sort_keys=True)
 
     # tidy: empty folders under chops/<stem>/ and in the organized tree
     pruned = 0

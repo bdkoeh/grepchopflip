@@ -33,3 +33,10 @@ other samples of its class in the same song), 0-100 `features.brightness` / `fea
 `smpl`/`acid` chunks in the WAV (root note, loop points, tempo; the same values are in `wav_chunks`).
 Optional extras: `tag` (AudioSet tags and a drum-class check with AST, BSD-3-Clause weights) and `embed`
 (CLAP embeddings in `embeddings/clap.npy`, Apache-2.0 weights): `uv sync --extra tag --extra embed`.
+
+Things to know: `--no-tag` does not withdraw `classifier=` review flags an earlier run wrote (run with the
+tag extra again to re-check them); `--no-embed` leaves an existing `embeddings/clap.npy` in place;
+`gcf chop --force` rewrites the chop records and so drops classifier flags until `gcf enrich` runs again.
+The CLAP weights are the model owner's `pytorch_model.bin` (sha256-pinned, loaded with torch's safe
+weights-only loader); a `model.safetensors` exists only in unmerged conversion pull requests on Hugging
+Face, so it is not used.
