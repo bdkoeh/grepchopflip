@@ -7,7 +7,7 @@ script uses that name). The name reads as a pipe, `grep | chop | flip`, and maps
 find the material, cut it, make it yours. Written 2026-10-24. This document is the
 front-loaded context for building the tool. It is meant to be read in full by a person or an
 agent before any code is written. Detailed source material with citations lives in
-`docs/references/` and the research report in `reports/`.
+`docs/references/`. (The pre-project MPC workflow research that led here was removed from the repo on 2026-10-26; it lives in git history before that date.)
 
 ---
 
@@ -29,7 +29,7 @@ bass notes, chord stabs and vocal phrases, plus a machine-readable index.
 
 The owner of this project makes beats on an Akai MPC One but has no patience for chopping
 samples and setting up kits by hand. The plan is for an AI agent on the PC to handle the
-technical work so they can focus on playing. Research (see `reports/`) showed that every
+technical work so they can focus on playing. Research (2026-10-24) showed that every
 component needed for automated chopping exists as mature open-source software, but nobody has
 glued them into one song-to-samples pipeline, and nothing offers an agent-friendly interface.
 This tool is that glue. It is the first and most valuable piece of the larger "agent-assisted
@@ -440,5 +440,4 @@ core install stays light.
   pyloudnorm, PANNs, CLAP, DSP practice, full per-sample schema draft.
 - `docs/references/cli_design_and_features.md`: naming conventions, WAV chunk layouts, agent
   CLI principles, command surface, feature list, prior art.
-- `reports/AI assisted MPC One beat making.md`: the wider workflow this tool fits into.
-- `research_notes/`: raw cited notes behind the report.
+- Earlier MPC-workflow research (`reports/`, `research_notes/`) was removed 2026-10-26; see git history.
