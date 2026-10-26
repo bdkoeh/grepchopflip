@@ -9,3 +9,9 @@ build/
 out/
 *.wav
 !tests/fixtures/*.wav
+# Owner's private test recordings (planning folder junction to Downloads); never committed
+test_tracks/
+test_tracks
+*.mp3
+*.flac
+*.m4a

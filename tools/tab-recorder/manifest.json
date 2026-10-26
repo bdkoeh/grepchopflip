@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "GCF Tab Recorder",
+  "version": "0.1.0",
+  "description": "Record the current tab's audio to a WAV file in Downloads/gcf_test_tracks. Test helper for Grep Chop Flip.",
+  "permissions": ["tabCapture", "offscreen", "downloads", "storage", "activeTab"],
+  "action": {
+    "default_title": "GCF Tab Recorder",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>GCF Tab Recorder</title>
+    <style>
+      body { font: 14px system-ui, sans-serif; margin: 0; padding: 14px; width: 260px; background: #1b1b1f; color: #eee; }
+      h1 { font-size: 13px; margin: 0 0 10px; color: #aaa; font-weight: 600; letter-spacing: .04em; }
+      .row { display: flex; gap: 8px; align-items: center; }
+      button { border: 0; border-radius: 8px; padding: 10px 14px; font-size: 14px; cursor: pointer; color: #fff; background: #333; }
+      button:hover { filter: brightness(1.15); }
+      #record { background: #c62828; width: 100%; }
+      #stop { background: #555; width: 100%; }
+      #save { background: #2e7d32; flex: 1; }
+      #delete { background: #6d2c2c; flex: 1; }
+      input { width: 100%; box-sizing: border-box; padding: 9px 10px; border-radius: 8px; border: 1px solid #444; background: #111; color: #eee; margin: 10px 0; font-size: 14px; }
+      .meta { color: #999; font-size: 12px; margin: 8px 0 0; min-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #c62828; margin-right: 6px; animation: blink 1s infinite; }
+      @keyframes blink { 50% { opacity: .2; } }
+      .hidden { display: none; }
+      .err { color: #ff8a80; font-size: 12px; margin-top: 8px; }
+    </style>
+  </head>
+  <body>
+    <h1>GCF TAB RECORDER</h1>
+    <div id="idle">
+      <button id="record">● Record this tab</button>
+    </div>
+    <div id="recording" class="hidden">
+      <button id="stop"><span class="dot"></span>Stop <span id="timer">0:00</span></button>
+    </div>
+    <div id="stopped" class="hidden">
+      <input id="name" placeholder="Name this recording" autocomplete="off" />
+      <div class="row">
+        <button id="save">Save</button>
+        <button id="delete">Delete</button>
+      </div>
+    </div>
+    <div id="meta" class="meta"></div>
+    <div id="err" class="err"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>
