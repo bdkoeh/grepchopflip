@@ -24,12 +24,13 @@ One-shot rules
   (`bleed_floor`; normalizing it would only raise separation bleed).
 - Mono fold, fades 1/8 ms, peak -1 dBFS, 24-bit WAV.
 
-needs_review (D-021), reasons are listed in `extra["review_reasons"]`
-- `weak_onset`   hh/ride/crash only: onset strength < 30 % of the part's 90th-percentile onset strength.
+needs_review (D-021), reasons are listed in `extra["review_reasons"]`; constants tuned on the owner's three
+tracks on 2026-10-25 (D-056) so that the flags mark broken hits, not merely soft ones:
+- `weak_onset`   hh/ride/crash only: onset strength < 23 % of the part's 90th-percentile onset strength.
 - `quiet`        any part: peak below the part's loudest hit by more than `QUIET_REL_DB[part]`
-                 (26 dB hh/ride/crash, 30 toms, 36 kick/snare, so ghost notes are kept but flagged).
-- `poor_attack`  any part: pre-roll bleed (peak in the 5 ms before the start > 35 % of the slice peak), or
-                 (kick/snare/toms/hh) the first 15 ms reach less than 30 % of the slice peak. Ride and
+                 (29.5 dB hh/ride/crash, i.e. at their -30 dB bleed floor; 30 toms; 36 kick/snare).
+- `poor_attack`  any part: pre-roll bleed (peak in the 5 ms before the start > 50 % of the slice peak), or
+                 (kick/snare/toms/hh) the first 15 ms reach less than 9 % of the slice peak. Ride and
                  crash may swell, so they are exempt from the second test.
 
 Loops (D-024, D-028 r2): skipped when `tempo_reliable` is false. Tracker downbeats lag the real hit by
@@ -37,8 +38,9 @@ Loops (D-024, D-028 r2): skipped when `tempo_reliable` is false. Tracker downbea
 (`common.corrected_downbeats`, minus the pre-roll). Windows come from `common.bar_loops` on the corrected
 downbeats, bars (1, 2, 4); both ends are zero-snapped and get a 1.5 ms fade. Dropped: windows whose
 duration is more than 8 % off `bars * beats_per_bar * 60 / bpm` (`off_length`) and windows with RMS below
--50 dBFS (`silent`). Loops are flagged needs_review when `grid_source != "tracked"` or
-`grid_consistency < 0.8`. `rank` (1 = best, per bar length) orders windows by the standard deviation of
+-50 dBFS (`silent`). Loops are flagged needs_review for `length_off_X.Xpct` (2-4 % off) and
+`boundary_not_on_hit`. When `grid_source != "tracked"` or `grid_consistency < 0.8` every loop gets
+`extra["grid_uncertain"] = true` and `extra["grid_notes"]` (D-056), which is not a review reason. `rank` (1 = best, per bar length) orders windows by the standard deviation of
 the per-beat RMS in dB (windows split into bars*beats_per_bar equal segments): lower means steadier.
 """
 
@@ -77,7 +79,12 @@ PART_PARAMS: dict[str, dict[str, float]] = {
 }
 SOFT_PARTS = ("hh", "ride", "crash")
 SWELL_PARTS = ("ride", "crash")
-QUIET_REL_DB = {"kick": -36.0, "snare": -36.0, "toms": -30.0, "hh": -26.0, "ride": -26.0, "crash": -26.0}
+QUIET_REL_DB = {
+    "kick": -36.0, "snare": -36.0, "toms": -30.0,   # unchanged: no kick/snare hit and only 2 near-silent toms flagged
+    # tuned on the owner's three tracks on 2026-10-25 (was -26): cymbal hits sit above the -30 dB bleed floor;
+    # -29.5 clears 82 % of the 137 quiet flags and keeps only hits at the floor itself (peaks down to -48 dBFS)
+    "hh": -29.5, "ride": -29.5, "crash": -29.5,
+}
 
 MIN_SLICE_MS = 30.0
 PREROLL_MS = 1.5            # the 1 ms fade-in plus margin finishes before the attack
@@ -102,12 +109,12 @@ LOOP_LENGTH_WARN = 0.02     # flag loops between WARN and TOL
 GRID_WINDOW_S = 0.070       # look back this far for a hit (tracker lag reached 50 ms on a normalized grid;
                             # still well under a 16th note at 80 BPM = 190 ms)
 GRID_AFTER_S = 0.012        # forwards only this much (trackers lag, they don't lead)
-GRID_CONSISTENCY_MIN = 0.8
+GRID_CONSISTENCY_MIN = common.GRID_CONSISTENCY_MIN   # below this the grid is "uncertain" (a note, D-056)
 RANKING = "std_of_per_beat_rms_db"
 
-WEAK_ONSET_REL = 0.30
-PRE_BLEED_REL = 0.35
-ATTACK_REL = 0.30
+WEAK_ONSET_REL = 0.23   # tuned on the owner's three tracks on 2026-10-25 (was 0.30): clears 27 of 31 weak_onset flags
+PRE_BLEED_REL = 0.50    # tuned on the owner's three tracks on 2026-10-25 (was 0.35): only pre-roll bleed >= half the hit
+ATTACK_REL = 0.09       # tuned on the owner's three tracks on 2026-10-25 (was 0.30): flagged hits had median 0.15
 STATE_REVIEW = (WEAK_ONSET_REL, PRE_BLEED_REL, ATTACK_REL)
 
 
@@ -145,6 +152,7 @@ def _settings(sensitivity: float) -> dict:
         "pre_attack_ms": PRE_ATTACK_MS,
         "pre_attack_rel_db": PRE_ATTACK_REL_DB,
         "grid_consistency_min": GRID_CONSISTENCY_MIN,
+        "grid_uncertain": "note",          # D-056: an uncertain grid is a loop note, not a review reason
         "ranking": RANKING,
     }
 
@@ -209,6 +217,20 @@ def _db(v: float) -> float:
 
 
 # ----------------------------------------------------------------------------- one-shots
+
+def _review_reasons(part: str, hit: dict, loudest: float, ref_strength: float) -> list[str]:
+    """The D-021 review rules (module docstring) for one hit: `hit` carries `raw_peak`, `strength`,
+    `pre_ratio` and `attack_ratio`; `loudest` is the part's loudest raw peak, `ref_strength` the part's
+    90th-percentile onset strength."""
+    reasons = []
+    if part in SOFT_PARTS and ref_strength > 0 and hit["strength"] < WEAK_ONSET_REL * ref_strength:
+        reasons.append("weak_onset")
+    if hit["raw_peak"] < loudest * 10 ** (QUIET_REL_DB[part] / 20):
+        reasons.append("quiet")
+    if hit["pre_ratio"] > PRE_BLEED_REL or (part not in SWELL_PARTS and hit["attack_ratio"] < ATTACK_REL):
+        reasons.append("poor_attack")
+    return reasons
+
 
 def _chop_part(part: str, y: np.ndarray, sr: int, sensitivity: float,
                dropped: dict[str, int]) -> list[dict]:
@@ -295,14 +317,7 @@ def _chop_part(part: str, y: np.ndarray, sr: int, sensitivity: float,
         return []
     ref_strength = float(np.percentile([o["strength"] for o in out], 90))
     for o in out:
-        reasons = []
-        if part in SOFT_PARTS and ref_strength > 0 and o["strength"] < WEAK_ONSET_REL * ref_strength:
-            reasons.append("weak_onset")
-        if o["raw_peak"] < loudest * 10 ** (QUIET_REL_DB[part] / 20):
-            reasons.append("quiet")
-        if o["pre_ratio"] > PRE_BLEED_REL or (part not in SWELL_PARTS and o["attack_ratio"] < ATTACK_REL):
-            reasons.append("poor_attack")
-        o["reasons"] = reasons
+        o["reasons"] = _review_reasons(part, o, loudest, ref_strength)
         z = common.apply_fades(o.pop("mono"), sr, FADE_IN_MS, FADE_OUT_MS)
         o["audio"] = common.peak_normalize(z, NORMALIZE_DBFS)
         o["gain_db"] = round(NORMALIZE_DBFS - _db(float(np.abs(z).max())), 2)
@@ -356,12 +371,7 @@ def _loop_chops(drums: np.ndarray, sr: int, analysis: dict, grid: dict, dropped:
             pos[i] = common.zero_snap(drums, int(round(corrected[i] * sr)), search=SNAP_SEARCH)
         return pos[i]
 
-    gate: list[str] = []
-    if analysis.get("grid_source", "tracked") != "tracked":
-        gate.append(f"grid_source={analysis.get('grid_source')}")
-    cons = analysis.get("grid_consistency")
-    if cons is not None and float(cons) < GRID_CONSISTENCY_MIN:
-        gate.append(f"grid_consistency={float(cons):.2f}")
+    notes = common.grid_notes(analysis)       # D-056: a note on the loop, not a review reason
 
     cand: list[dict] = []
     for s_s, e_s, nbars in common.bar_loops(corrected, bpb, duration, LOOP_BARS):
@@ -370,7 +380,7 @@ def _loop_chops(drums: np.ndarray, sr: int, analysis: dict, grid: dict, dropped:
         if e > len(drums) or e - s < 2:
             continue
         dur = (e - s) / sr
-        reasons = list(gate)
+        reasons: list[str] = []
         # reference bar length: the median corrected bar as played beats the BPM estimate (which can
         # sit 1-2 % off and would flag every loop of a steady band)
         ref_bar = float(np.median(np.diff(corrected))) if len(corrected) >= 3 else (
@@ -422,7 +432,7 @@ def _loop_chops(drums: np.ndarray, sr: int, analysis: dict, grid: dict, dropped:
                    "end_downbeat_corrected_s": corrected[c["i1"]],
                    "boundary_sources": [grid.get("correction_source", ["?"] * len(corrected))[c["i0"]],
                                         grid.get("correction_source", ["?"] * len(corrected))[c["i1"]]],
-                   "review_reasons": c["reasons"]},
+                   "review_reasons": c["reasons"], "grid_uncertain": bool(notes), "grid_notes": list(notes)},
             source_file=src[0], source_sha256=src[1], bit_depth=24, bar=c["i0"] + 1,
         )
         chop.extra["_audio"] = c["seg"]

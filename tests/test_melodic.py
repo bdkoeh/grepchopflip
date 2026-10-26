@@ -74,6 +74,20 @@ def test_stale_outputs_removed_on_rebuild(job):
     assert not stray.exists()
 
 
+def test_uncertain_grid_notes_melodic_loops_and_phrases_without_review(tmp_path):
+    # D-056: loops and grid-snapped phrases carry grid_uncertain + grid_notes; none go to review for it
+    root = write_job(tmp_path, {"other": _other()}, SECONDS)
+    ana = json.loads((root / "analysis.json").read_text())
+    ana.update(grid_source="normalized_half", grid_consistency=0.55)
+    (root / "analysis.json").write_text(json.dumps(ana))
+    chop_melodic(root, force=True)
+    chops = json.loads((root / "chops/melodic/chops.json").read_text())["chops"]
+    assert {c["kind"] for c in chops} == {"loop", "phrase"}
+    for c in chops:
+        assert c["extra"]["grid_uncertain"] is True and not c["needs_review"]
+        assert c["extra"]["grid_notes"] == ["grid_source=normalized_half", "grid_consistency=0.55"]
+
+
 def test_fast_chord_changes_do_not_make_two_beat_phrases(tmp_path):
     y = np.zeros(int(16 * SR), dtype=np.float32)
     a, b = [220.0, 261.63, 329.63], [233.08, 293.66, 349.23]

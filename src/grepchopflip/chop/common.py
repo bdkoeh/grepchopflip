@@ -186,6 +186,30 @@ def corrected_downbeats(downbeats_s: list[float], onsets_s: list[float], window_
     return out
 
 
+GRID_CONSISTENCY_MIN = 0.8
+
+
+def grid_notes(analysis: dict) -> list[str]:
+    """Why the beat map is uncertain, e.g. ["grid_source=normalized_half", "grid_consistency=0.55"]
+    (empty when it was tracked and consistent). D-056: loops and phrases cut on such a grid carry these
+    as `extra["grid_notes"]` with `extra["grid_uncertain"] = true`; they are not review reasons."""
+    notes: list[str] = []
+    if analysis.get("grid_source", "tracked") != "tracked":
+        notes.append(f"grid_source={analysis.get('grid_source')}")
+    cons = analysis.get("grid_consistency")
+    if cons is not None and float(cons) < GRID_CONSISTENCY_MIN:
+        notes.append(f"grid_consistency={float(cons):.2f}")
+    return notes
+
+
+def grid_warning(analysis: dict) -> str | None:
+    """The song-level line for index.json `analysis.warnings` (None when the beat map is fine)."""
+    notes = grid_notes(analysis)
+    if not notes:
+        return None
+    return f"beat map uncertain: {', '.join(notes)}; loop bar lines may be off by a beat"
+
+
 # ----------------------------------------------------------------------------- records
 
 @dataclass
