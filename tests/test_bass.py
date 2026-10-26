@@ -152,12 +152,15 @@ def test_bass_pitch_spread_flag_records_its_reason(tmp_path, monkeypatch):
     assert all(c["extra"]["review_reasons"] == ["pitch_spread=2.25st"] for c in shots)
 
 
-def test_shaky_grid_flags_loops_with_the_drum_wording(tmp_path):
+def test_shaky_grid_notes_loops_with_the_drum_wording_but_does_not_flag_them(tmp_path):
+    # D-056: an uncertain beat map is a note on the loop, not a review reason
     root = _flat_bass_job(tmp_path, grid_source="normalized_half", grid_consistency=0.55)
     chop_bass(root, force=True)
     loops = [c for c in _chops(root) if c["kind"] == "loop"]
-    assert loops and all(c["needs_review"] for c in loops)
-    assert all(c["extra"]["review_reasons"] == ["grid_source=normalized_half", "grid_consistency=0.55"]
+    assert loops and not any(c["needs_review"] for c in loops)
+    assert all(c["extra"]["review_reasons"] == [] for c in loops)
+    assert all(c["extra"]["grid_uncertain"] is True for c in loops)
+    assert all(c["extra"]["grid_notes"] == ["grid_source=normalized_half", "grid_consistency=0.55"]
                for c in loops)
 
 
@@ -167,3 +170,4 @@ def test_steady_grid_loops_have_an_empty_reasons_list(tmp_path):
     loops = [c for c in _chops(root) if c["kind"] == "loop"]
     assert loops and not any(c["needs_review"] for c in loops)
     assert all(c["extra"]["review_reasons"] == [] for c in loops)
+    assert all(c["extra"]["grid_uncertain"] is False and c["extra"]["grid_notes"] == [] for c in loops)

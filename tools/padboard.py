@@ -249,7 +249,10 @@ def build(folder: Path) -> Path:
                 label += '<br><span class="words">' + html.escape(" ".join(words)) + "</span>"
         reasons = flags.get(rel)
         mark = ' <span style="color:#e6a23c">&#9888; ' + html.escape(", ".join(reasons)) + "</span>" if reasons else ""
+        if row.get("grid_uncertain"):        # D-056: cut on an uncertain beat map (a note, not a review flag)
+            mark += ' <span style="color:#9a9" title="beat map uncertain">~grid</span>'
         tip = html.escape(rel + (" | review: " + ", ".join(reasons) if reasons else "")
+                          + (" | beat map uncertain" if row.get("grid_uncertain") else "")
                           + (" | " + _facts(row) if row and _facts(row) else ""))
         search = html.escape(" ".join([*words, str(row.get("class") or ""), rel]).lower())
         cls = "" if is_rep else ' class="member"'

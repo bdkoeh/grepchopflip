@@ -33,6 +33,7 @@ import numpy as np
 import soundfile as sf
 
 from grepchopflip import __version__, layers
+from grepchopflip.chop.common import grid_warning
 from grepchopflip.enrich import EMPTY_FIELDS, carry_over
 from grepchopflip.enrich import counts as enrich_counts
 from grepchopflip.enrich.wavchunks import TMP_SUFFIX as CHUNK_TMP_SUFFIX
@@ -356,6 +357,9 @@ def sample_row(c: dict, f: dict, path: str, fi: dict, sid: str) -> dict:
     return {
         "id": sid, "path": path, "stem": c.get("stem"), "part": c.get("part"), "kind": c.get("kind"),
         "class": f["cls"], "needs_review": bool(c.get("needs_review")), "review_reasons": reasons,
+        # D-056: true when the loop/phrase was cut on an uncertain beat map (a note, not a review reason);
+        # null for chops not cut on the grid
+        "grid_uncertain": None if extra.get("grid_uncertain") is None else bool(extra["grid_uncertain"]),
         "source_start_s": c.get("source_start_s"), "source_end_s": c.get("source_end_s"),
         "duration_s": round(fi["frames"] / sr, 6) if sr else 0.0,
         "source_start_bar": c.get("bar"), "start_beat": c.get("start_beat"),
@@ -428,6 +432,7 @@ def make_index(song: Path, ctx: Context, docs: dict[Path, dict], rows: list[dict
             "key": ana.get("key"), "mode": ana.get("mode"), "key_confidence": ana.get("key_confidence"),
             "key_reliable": bool(ana.get("key_reliable")), "grid_source": ana.get("grid_source"),
             "grid_consistency": ana.get("grid_consistency"), "downbeats_s": list(ana.get("downbeats_s") or []),
+            "warnings": [w for w in [grid_warning(ana)] if w],
         },
         "models": ana.get("models") or {},
         "params": {"bit_depth": bit_depth, "normalize": "peak"},

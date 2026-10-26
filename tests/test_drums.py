@@ -158,16 +158,74 @@ def test_off_length_window_dropped(tmp_path):
         assert c["extra"]["loop_bpm"] == pytest.approx(120.0, rel=0.01)
 
 
-def test_loops_flagged_when_grid_not_tracked_or_inconsistent(tmp_path):
-    out = make_out(tmp_path / "a", extra={"grid_source": "normalized_half"})
+def test_uncertain_grid_is_a_note_not_a_review_flag(tmp_path):
+    # D-056: grid_source/grid_consistency go to extra.grid_notes; clean loops stay out of review
+    out = make_out(tmp_path / "a", extra={"grid_source": "normalized_half", "grid_consistency": 0.55})
     chop_drums(out)
     loops = [c for c in chops_of(out) if c["kind"] == "loop"]
-    assert loops and all(c["needs_review"] and "grid_source=normalized_half" in c["extra"]["review_reasons"]
-                         for c in loops)
-    out2 = make_out(tmp_path / "b", extra={"grid_consistency": 0.5})
+    assert loops
+    for c in loops:
+        assert c["extra"]["grid_uncertain"] is True
+        assert c["extra"]["grid_notes"] == ["grid_source=normalized_half", "grid_consistency=0.55"]
+        assert not any(r.startswith("grid_") for r in c["extra"]["review_reasons"])
+    clean = [c for c in loops if c["extra"]["boundary_sources"][1] != "tracked"]
+    assert clean and not any(c["needs_review"] or c["extra"]["review_reasons"] for c in clean)
+    # loops ending on the hit-less last downbeat keep their own reason
+    edge = [c for c in loops if c["extra"]["boundary_sources"][1] == "tracked"]
+    assert edge and all(c["needs_review"] and c["extra"]["review_reasons"] == ["boundary_not_on_hit"] for c in edge)
+    out2 = make_out(tmp_path / "b")                    # tracked, consistent grid: no note
     chop_drums(out2)
     loops2 = [c for c in chops_of(out2) if c["kind"] == "loop"]
-    assert loops2 and all(c["needs_review"] for c in loops2)
+    assert loops2 and all(c["extra"]["grid_uncertain"] is False and c["extra"]["grid_notes"] == [] for c in loops2)
+
+
+def test_length_off_loop_on_uncertain_grid_is_still_flagged():
+    from grepchopflip.chop import drums
+
+    rng = np.random.default_rng(4)
+    full = (rng.standard_normal((10 * SR, 2)) * 0.1).astype(np.float32)
+    corrected = [0.5, 2.5, 4.56, 6.5, 8.5]               # bars 2 and 3 are 3 % off the 2.0 s median bar
+    grid = {"downbeats_s_tracked": corrected, "downbeats_s_corrected": corrected,
+            "correction_source": ["kick_snare"] * 5, "beats_per_bar": 4, "bpm": 120.0}
+    analysis = {"bpm": 120.0, "beats_s": [0.5 + 0.5 * i for i in range(18)],
+                "grid_source": "normalized_half", "grid_consistency": 0.55}
+    loops = drums._loop_chops(full, SR, analysis, grid, {}, ("stems/drums.wav", "0" * 64))
+    one = {round(c.source_start_s, 2): c for c in loops if c.bars == 1}
+    for s in (2.5, 4.56):
+        c = one[s]
+        assert c.needs_review and len(c.extra["review_reasons"]) == 1
+        assert c.extra["review_reasons"][0] in ("length_off_2.9pct", "length_off_3.0pct", "length_off_3.1pct")
+        assert c.extra["grid_uncertain"] is True and c.extra["grid_notes"] == [
+            "grid_source=normalized_half", "grid_consistency=0.55"]
+    for s in (0.5, 6.5):
+        assert not one[s].needs_review and one[s].extra["review_reasons"] == []
+
+
+def test_review_thresholds_keep_moderately_quiet_hits_and_flag_broken_ones(monkeypatch):
+    # values like the owner's tracks (2026-10-25): a soft hat 28 dB under the loudest, a slightly smeared
+    # attack, a weak-ish onset -> kept; a hat at the bleed floor, a hit with no transient, a hit that is
+    # mostly pre-roll bleed and a hit with almost no onset -> still flagged
+    from grepchopflip.chop import drums
+
+    loud = 1.0
+
+    def hit(rel_db=-10.0, attack=0.9, pre=0.02, strength=0.8):
+        return {"raw_peak": loud * 10 ** (rel_db / 20), "attack_ratio": attack, "pre_ratio": pre,
+                "strength": strength}
+
+    moderate = hit(rel_db=-28.0, attack=0.15, pre=0.03, strength=0.26)
+    assert drums._review_reasons("hh", moderate, loud, 1.0) == []
+    assert drums._review_reasons("ride", hit(rel_db=-27.0, pre=0.40), loud, 1.0) == []
+    assert drums._review_reasons("hh", hit(rel_db=-29.8), loud, 1.0) == ["quiet"]
+    assert drums._review_reasons("snare", hit(rel_db=-38.0), loud, 1.0) == ["quiet"]
+    assert drums._review_reasons("hh", hit(attack=0.05), loud, 1.0) == ["poor_attack"]
+    assert drums._review_reasons("crash", hit(pre=0.85), loud, 1.0) == ["poor_attack"]
+    assert drums._review_reasons("hh", hit(strength=0.20), loud, 1.0) == ["weak_onset"]
+    # the previous constants flagged the moderate hit on every rule
+    monkeypatch.setattr(drums, "QUIET_REL_DB", {**drums.QUIET_REL_DB, "hh": -26.0})
+    monkeypatch.setattr(drums, "ATTACK_REL", 0.30)
+    monkeypatch.setattr(drums, "WEAK_ONSET_REL", 0.30)
+    assert drums._review_reasons("hh", moderate, loud, 1.0) == ["weak_onset", "quiet", "poor_attack"]
 
 
 def test_quiet_slice_before_a_loud_slow_attack_is_dropped_or_flagged(tmp_path):
