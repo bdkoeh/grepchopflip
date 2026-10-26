@@ -45,6 +45,10 @@ words = [
   "nvidia-cudnn-cu12; sys_platform == 'linux'",
 ]
 notes = ["muscriptor"]         # weights are CC BY-NC 4.0 (non-commercial); gcf prints a notice on first use
+# `gcf enrich` extras (D-041): AST instrument tags (BSD-3-Clause weights) and CLAP embeddings (Apache-2.0
+# weights). Both run on torch from the core; weights come from Hugging Face via `gcf models pull`.
+tag = ["transformers>=5,<6"]
+embed = ["transformers>=5,<6"]
 
 [project.scripts]
 gcf = "grepchopflip.cli:app"
@@ -55,6 +59,7 @@ Homepage = "https://github.com/grepchopflip/grepchopflip"
 [dependency-groups]
 dev = [
   "pytest>=8",
+  "wavinfo>=2",                # independent reader for the smpl chunk round-trip test
 ]
 
 [build-system]

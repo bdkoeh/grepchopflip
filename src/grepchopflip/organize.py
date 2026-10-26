@@ -32,6 +32,8 @@ import numpy as np
 import soundfile as sf
 
 from grepchopflip import __version__
+from grepchopflip.enrich import EMPTY_FIELDS, carry_over
+from grepchopflip.enrich import counts as enrich_counts
 from grepchopflip.errors import InputError
 from grepchopflip.index_schema import INDEX_NAME, INDEX_SCHEMA_VERSION
 from grepchopflip.loudness import Levels, measure
@@ -363,7 +365,7 @@ def sample_row(c: dict, f: dict, path: str, fi: dict, sid: str) -> dict:
         "crest_db": lv.crest_db, "lufs_i": lv.lufs_i, "lufs_measure": lv.lufs_measure,
         "fade_in_ms": c.get("fade_in_ms"), "fade_out_ms": c.get("fade_out_ms"),
         "zero_snapped": c.get("zero_snapped"),
-        "character": None, "dedup_group": None, "is_dedup_representative": None, "tags": [],
+        **EMPTY_FIELDS, "tags": [],        # filled by `gcf enrich` (slice 7)
         "source_file": c.get("source_file"), "source_sha256": c.get("source_sha256"), "sha256": fi["sha256"],
     }
 
@@ -397,6 +399,7 @@ def _stages(song: Path, docs: dict[Path, dict], organized: bool, bit_depth: int,
         "analyze": {"done": bool(ctx.analysis), "gcf_version": ctx.analysis.get("gcf_version")},
         "chop": {"done": True, "files": chop_files},
         "organize": {"done": organized, "bit_depth": bit_depth},
+        "enrich": {"done": False},
     }
 
 
@@ -425,14 +428,18 @@ def make_index(song: Path, ctx: Context, docs: dict[Path, dict], rows: list[dict
         "models": ana.get("models") or {},
         "params": {"bit_depth": bit_depth, "normalize": "peak"},
         "stages": _stages(song, docs, organized, bit_depth, ctx),
+        "counts": enrich_counts(rows),
+        "enrichment": None,
         "samples": rows,
     }
 
 
 def write_index(song: Path, doc: dict) -> bool:
-    """Write index.json unless it is identical apart from `created` (then the old file, and its time, stay)."""
+    """Write index.json unless it is identical apart from `created` (then the old file, and its time, stay).
+    A rebuild keeps the previous `gcf enrich` results when the samples are unchanged (enrich.carry_over)."""
     p = song / INDEX_NAME
     old = _read_json(p)
+    doc = carry_over(old, doc)
     if old and {k: v for k, v in old.items() if k != "created"} == {k: v for k, v in doc.items() if k != "created"}:
         return False
     return _write_json_if_changed(p, doc, indent=2, ensure_ascii=False)

@@ -4,10 +4,14 @@
     python tools/padboard.py <root> --serve [PORT] # writes a padboard.html in every chops subfolder
                                                    # under <root> and serves <root> over HTTP
 
-Click a pad, or press 1-9 then q-p, to play the first 19 pads. The Loop toggle (key L) repeats the
+Click a pad, or press 1-9 then q-p, to play the first 19 visible pads. The Loop toggle (key L) repeats the
 clicked pad until you click it again (or another pad). Looping is sample-accurate (Web Audio) when the
 page is served over HTTP; when opened from a file path it falls back to the audio element's loop, which
 can have a tiny gap in some browsers. From Windows, a WSL server is reachable at http://localhost:PORT.
+
+After `gcf enrich` (D-050) the board shows only the representative of each near-duplicate group; a pad's
+"+N" opens its group, "All" shows everything. Pads show character words; the filter box keeps pads whose
+words, class or name contain every typed word (e.g. "dark", "punchy kick").
 """
 
 from __future__ import annotations
@@ -33,10 +37,18 @@ button{{height:72px;background:#2a2a2a;color:#eee;border:1px solid #444;border-r
 button.on{{background:#2d6a4f}}
 button.looping{{background:#8a4b08}}
 b{{display:block;font-size:15px}}
-#mode{{color:#888;font-size:12px}}
+#mode,#count{{color:#888;font-size:12px}}
+button.member{{border-style:dashed;background:#222}}
+.hide{{display:none}}
+.more{{float:right;color:#9cf;padding:0 4px;border:1px solid #456;border-radius:6px}}
+.words{{color:#e9c46a}}
+#filter{{background:#222;color:#eee;border:1px solid #444;border-radius:8px;padding:6px}}
 </style>
 <div class="bar"><h3 style="margin:0">{title}</h3>
-<label id="looplab"><input type="checkbox" id="loop"> Loop (L)</label><span id="mode"></span></div>
+<label id="looplab"><input type="checkbox" id="loop"> Loop (L)</label>
+<label id="alllab"><input type="checkbox" id="all"> All</label>
+<input id="filter" placeholder="filter: dark, punchy kick ..." size="24">
+<span id="count">{count}</span><span id="mode"></span></div>
 <div class="grid">
 {pads}
 </div>
@@ -86,10 +98,39 @@ function play(i) {{
 }}
 loopBox.onchange = () => {{ document.getElementById('looplab').classList.toggle('on', loopBox.checked); stopAll(); }};
 pads.forEach((p, i) => p.onclick = () => play(i));
+// D-050: representatives by default; "+N" opens a group, "All" shows every pad; the filter matches words
+const allBox = document.getElementById('all'), filt = document.getElementById('filter');
+const open = new Set();
+function refresh() {{
+  const want = filt.value.toLowerCase().split(/[\\s,]+/).filter(Boolean);
+  pads.forEach(p => {{
+    const shown = allBox.checked || p.dataset.rep === '1' || open.has(p.dataset.group);
+    const match = want.every(w => p.dataset.words.includes(w));
+    p.classList.toggle('hide', !(shown && match));
+  }});
+  document.querySelectorAll('.more').forEach(m => {{
+    m.textContent = (open.has(m.dataset.group) ? '-' : '+') + m.dataset.n;
+  }});
+  const vis = visible();
+  vis.forEach((p, k) => p.querySelector('b').textContent = k < keys.length ? keys[k].toUpperCase() : '');
+  pads.filter(p => !vis.includes(p)).forEach(p => p.querySelector('b').textContent = '');
+}}
+function visible() {{ return pads.filter(p => !p.classList.contains('hide')); }}
+document.querySelectorAll('.more').forEach(m => m.onclick = e => {{
+  e.stopPropagation();
+  const g = m.dataset.group;
+  open.has(g) ? open.delete(g) : open.add(g);
+  refresh();
+}});
+allBox.onchange = () => {{ document.getElementById('alllab').classList.toggle('on', allBox.checked); refresh(); }};
+filt.oninput = refresh;
+refresh();
 addEventListener('keydown', e => {{
+  if (e.target === filt) return;
   if (e.key.toLowerCase() === 'l' && !e.repeat) {{ loopBox.checked = !loopBox.checked; loopBox.onchange(); return; }}
-  const i = keys.indexOf(e.key.toLowerCase());
-  if (i >= 0 && i < pads.length && !e.repeat) play(i);
+  const k = keys.indexOf(e.key.toLowerCase());
+  const vis = visible();
+  if (k >= 0 && k < vis.length && !e.repeat) play(pads.indexOf(vis[k]));
 }});
 </script>
 """
@@ -158,32 +199,69 @@ def _facts(s: dict) -> str:
     return " · ".join(bits)
 
 
+def _ordered(wavs: list[Path], folder: Path, rows: dict[str, dict]) -> list[Path]:
+    """Path order, except that each group's other members follow right after its representative."""
+    rels = [w.relative_to(folder).as_posix() for w in wavs]
+    members: dict[str, list[Path]] = {}
+    for w, rel in zip(wavs, rels):
+        row = rows.get(rel) or {}
+        if row.get("dedup_group") is not None and row.get("is_dedup_representative") is False:
+            members.setdefault(str(row["dedup_group"]), []).append(w)
+    placed = {m for ms in members.values() for m in ms}
+    out: list[Path] = []
+    for w, rel in zip(wavs, rels):
+        if w in placed:
+            continue
+        out.append(w)
+        row = rows.get(rel) or {}
+        if row.get("is_dedup_representative"):
+            out.extend(members.pop(str(row.get("dedup_group")), []))
+    for ms in members.values():          # a group whose representative is on another board (should not happen)
+        out.extend(ms)
+    return out
+
+
 def build(folder: Path) -> Path:
-    wavs = sorted(p for p in folder.rglob("*.wav") if p.is_file())
     flags = _review_flags(folder)
     rows = _index_rows(folder)
+    wavs = _ordered(sorted(p for p in folder.rglob("*.wav") if p.is_file()), folder, rows)
     pads, audios = [], []
+    n_rep = 0
     for i, w in enumerate(wavs):
         rel = w.relative_to(folder).as_posix()
-        key = KEYS[i] if i < len(KEYS) else ""
         label = html.escape(rel)
-        row = rows.get(rel)
+        row = rows.get(rel) or {}
+        words = list(row.get("character") or [])
+        is_rep = row.get("is_dedup_representative") is not False      # not enriched: every pad shows
+        n_rep += is_rep
+        group = str(row.get("dedup_group") or rel)
+        more = ""
+        if is_rep and (row.get("dedup_size") or 1) > 1:
+            n = int(row["dedup_size"]) - 1
+            more = f'<span class="more" data-group="{html.escape(group)}" data-n="{n}">+{n}</span>'
         if row:
             if row.get("needs_review"):
                 flags[rel] = list(row.get("review_reasons") or []) or ["needs_review"]
             facts = _facts(row)
             if facts:
                 label += '<br><span style="color:#8bc">' + html.escape(facts) + "</span>"
+            if words:
+                label += '<br><span class="words">' + html.escape(" ".join(words)) + "</span>"
         reasons = flags.get(rel)
         mark = ' <span style="color:#e6a23c">&#9888; ' + html.escape(", ".join(reasons)) + "</span>" if reasons else ""
         tip = html.escape(rel + (" | review: " + ", ".join(reasons) if reasons else "")
                           + (" | " + _facts(row) if row and _facts(row) else ""))
-        pads.append(f'<button title="{tip}"><b>{html.escape(key.upper())}</b>{label}{mark}</button>')
+        search = html.escape(" ".join([*words, str(row.get("class") or ""), rel]).lower())
+        cls = "" if is_rep else ' class="member"'
+        pads.append(f'<button{cls} title="{tip}" data-group="{html.escape(group)}" data-rep="{int(is_rep)}" '
+                    f'data-words="{search}">{more}<b></b>{label}{mark}</button>')
         src = urllib.parse.quote(rel)
         audios.append(f'<audio id="a{i}" src="{src}" preload="none"></audio>')
     out = folder / "padboard.html"
+    count = f"{len(wavs)} samples, {n_rep} representatives" if n_rep != len(wavs) else f"{len(wavs)} samples"
     out.write_text(
-        PAGE.format(title=html.escape(folder.name), pads="\n".join(pads), audios="\n".join(audios), keys=KEYS),
+        PAGE.format(title=html.escape(folder.name), pads="\n".join(pads), audios="\n".join(audios), keys=KEYS,
+                    count=count),
         encoding="utf-8",
     )
     return out

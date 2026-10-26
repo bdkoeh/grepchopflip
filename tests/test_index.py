@@ -17,6 +17,8 @@ SAMPLE_KEYS = {
     "sample_rate", "bit_depth", "root_midi", "root_note", "root_confidence", "key", "mode", "peak_dbfs",
     "rms_dbfs", "crest_db", "lufs_i", "lufs_measure", "fade_in_ms", "fade_out_ms", "zero_snapped", "character",
     "dedup_group", "is_dedup_representative", "tags", "source_file", "source_sha256", "sha256",
+    # schema 1.1 (slice 7): null until `gcf enrich`
+    "features", "class_confidence", "classifier_class", "dedup_size", "embedding_ref", "wav_chunks",
 }
 
 
@@ -41,7 +43,7 @@ def test_index_validates_and_has_every_field(song):
     v = validate_index_file(song)
     assert v == {"valid": True, "problems": [], "samples": 16}
     doc = _index(song)
-    assert doc["schema_version"] == "1.0" and doc["generator"]["name"] == "gcf"
+    assert doc["schema_version"] == "1.1" and doc["generator"]["name"] == "gcf"
     assert doc["created"].endswith("Z") and doc["params"] == {"bit_depth": 24, "normalize": "peak"}
     assert doc["source"]["license"] == "unknown" and doc["source"]["title"] == "My Song"
     assert doc["analysis"]["bpm"] == 92.0 and doc["models"]["beat_tracker"]["name"] == "beat_this"

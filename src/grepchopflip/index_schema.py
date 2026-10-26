@@ -6,7 +6,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-INDEX_SCHEMA_VERSION = "1.0"
+INDEX_SCHEMA_VERSION = "1.1"       # 1.1 (slice 7): enrichment fields, `counts`, `enrichment`; 1.0 still validates
 INDEX_NAME = "index.json"
 SCHEMA_PATH = Path(__file__).parent / "schemas" / "index.schema.json"
 

@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 from grepchopflip.config import models_dir
@@ -156,3 +157,97 @@ def ensure_file(name: str, urls: list[str], sha256: str, dest_dir: Path | str) -
 def beat_this_checkpoint() -> Path:
     """Path to the verified beat_this final0 checkpoint, downloading it on first use."""
     return ensure_file(BEAT_THIS_FILE, BEAT_THIS_URLS, BEAT_THIS_SHA256, models_dir() / "beat_this")
+
+
+# ----------------------------------------------------------------------------- Hugging Face models (D-039, D-041)
+
+@dataclass(frozen=True)
+class HFModel:
+    """A Hugging Face model pinned to one commit, every file checked against its sha256."""
+
+    key: str
+    repo: str
+    revision: str
+    files: tuple[tuple[str, str], ...]   # (filename, sha256)
+    license: str
+    extra: str
+    size_mb: int
+
+    @property
+    def name(self) -> str:
+        return self.repo
+
+    def url(self, filename: str) -> str:
+        return f"https://huggingface.co/{self.repo}/resolve/{self.revision}/{filename}"
+
+    def dir(self) -> Path:
+        return models_dir() / "hf" / self.repo.replace("/", "--") / self.revision
+
+    def record(self) -> dict:
+        """What goes into index.json `models`."""
+        return {"name": self.repo, "revision": self.revision, "license": self.license,
+                "source": f"https://huggingface.co/{self.repo}"}
+
+
+# sha256 of the LFS weights from the Hugging Face API (`?blobs=true`), of the small JSON files from a download;
+# all pinned 2026-10-25 at the revisions below.
+AST = HFModel(
+    key="ast", repo="MIT/ast-finetuned-audioset-10-10-0.4593", revision="f826b80d28226b62986cc218e5cec390b1096902",
+    files=(
+        ("config.json", "a93d525511d77e8ecc933d09674b85099815bbbb417c228a4edd655e252fb9ff"),
+        ("preprocessor_config.json", "8d04ba5a9c6fca5d39d0de2b1fd05ecf79deb589fbba279728bbebac39934231"),
+        ("model.safetensors", "ae0c1e2ad4e1381d851fa9bf298ba13ebc9c5a914cdee2dbe427a6583869924d"),
+    ),
+    license="BSD-3-Clause", extra="tag", size_mb=331,
+)
+CLAP = HFModel(
+    key="clap", repo="laion/larger_clap_music", revision="a0b4534a14f58e20944452dff00a22a06ce629d1",
+    files=(
+        ("config.json", "2d7722d338bb83ea8824272b1431f088954d3425d79eb3c2d39489478516dc03"),
+        ("preprocessor_config.json", "9739f58296aa6f9ac18008fd0150fb2649bc554985fbde86d0a4041c882ac753"),
+        ("pytorch_model.bin", "5c289311f4a030d768af7ffbfdecd01b008aa64824211899a4e59f4f9d154fd1"),
+    ),
+    license="Apache-2.0", extra="embed", size_mb=741,
+)
+HF_MODELS: dict[str, HFModel] = {m.key: m for m in (AST, CLAP)}
+EXTRA_MODELS: dict[str, tuple[HFModel, ...]] = {"tag": (AST,), "embed": (CLAP,)}
+
+
+def hf_cached(m: HFModel) -> bool:
+    d = m.dir()
+    return all((d / f).is_file() and _is_verified(d / f, sha) for f, sha in m.files)
+
+
+def ensure_hf(m: HFModel) -> Path:
+    """Folder holding every pinned file of `m`, downloading and checking them first when needed."""
+    d = m.dir()
+    for f, sha in m.files:
+        ensure_file(f, [m.url(f)], sha, d)
+    return d
+
+
+def pull(extras: list[str] | None = None, all_models: bool = False) -> list[dict]:
+    """`gcf models pull`: prefetch models. No arguments: the core beat tracker; `extras`: their models;
+    `all_models`: everything gcf's own downloader manages (the stem separators download through
+    audio-separator on first use and are not covered)."""
+    wanted: list = []
+    if all_models or not extras:
+        wanted.append("beat_this")
+    for e in (list(EXTRA_MODELS) if all_models else extras or []):
+        if e not in EXTRA_MODELS:
+            raise ValueError(f"unknown extra {e!r}; choose from {', '.join(EXTRA_MODELS)}")
+        wanted.extend(m for m in EXTRA_MODELS[e] if m not in wanted)
+    out = []
+    for w in wanted:
+        if w == "beat_this":
+            p = models_dir() / "beat_this" / BEAT_THIS_FILE
+            was = p.is_file() and _is_verified(p, BEAT_THIS_SHA256)
+            beat_this_checkpoint()
+            out.append({"model": "beat_this final0", "extra": None, "license": "MIT", "path": str(p),
+                        "cached": was})
+        else:
+            was = hf_cached(w)
+            d = ensure_hf(w)
+            out.append({"model": w.repo, "extra": w.extra, "license": w.license, "revision": w.revision,
+                        "path": str(d), "cached": was})
+    return out
