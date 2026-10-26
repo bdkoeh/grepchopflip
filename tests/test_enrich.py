@@ -40,7 +40,7 @@ def test_core_enrich_fills_index_and_validates(song):
     assert r["cached"] is False and r["samples"] == 16 and r["problems"] == []
     assert set(r["skipped"]) == {"tag", "embed"} and "uv sync --extra tag" in r["skipped"]["tag"]
     doc = _index(song)
-    assert doc["schema_version"] == "1.1" and doc["stages"]["enrich"]["done"] is True
+    assert doc["schema_version"] == "1.2" and doc["stages"]["enrich"]["done"] is True
     assert validate_index_file(song)["valid"]
     for s in doc["samples"]:
         assert isinstance(s["character"], list) and set(s["character"]) <= set(enr.character.WORDS)
@@ -165,7 +165,7 @@ def test_old_1_0_index_still_validates(song):
     (song / "index.json").write_text(json.dumps(doc), encoding="utf-8")
     assert validate_index_file(song)["valid"]
     assert enr.enrich(song, workers=1)["samples"] == 16          # 1.0 input is accepted and upgraded
-    assert _index(song)["schema_version"] == "1.1"
+    assert _index(song)["schema_version"] == "1.2"
 
 
 def test_rejects_unorganized_and_missing(tmp_path, song):

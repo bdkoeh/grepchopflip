@@ -6,7 +6,9 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-INDEX_SCHEMA_VERSION = "1.1"       # 1.1 (slice 7): enrichment fields, `counts`, `enrichment`; 1.0 still validates
+INDEX_SCHEMA_VERSION = "1.2"       # 1.1 (slice 7): enrichment fields, `counts`, `enrichment`;
+#                                    1.2 (slice 12): `bar_span`, `layers_with`, top-level `layers`; 1.0/1.1 still validate
+SCHEMA_VERSIONS = ("1.0", "1.1", "1.2")
 INDEX_NAME = "index.json"
 SCHEMA_PATH = Path(__file__).parent / "schemas" / "index.schema.json"
 
@@ -63,6 +65,10 @@ def validate_index_file(song_dir: Path) -> dict:
     problems = schema_errors(doc)
     if isinstance(doc, dict) and isinstance(doc.get("samples"), list):
         problems += path_errors(Path(song_dir), doc)
+        if not problems:
+            from grepchopflip.layers import check
+
+            problems += check(doc)                 # partner ids exist, lists mirror each other (slice 12)
         if isinstance(doc.get("counts"), dict) and not problems:
             from grepchopflip.enrich import counts
 
