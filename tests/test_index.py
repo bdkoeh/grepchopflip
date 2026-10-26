@@ -19,6 +19,7 @@ SAMPLE_KEYS = {
     "dedup_group", "is_dedup_representative", "tags", "source_file", "source_sha256", "sha256",
     # schema 1.1 (slice 7): null until `gcf enrich`
     "features", "class_confidence", "classifier_class", "dedup_size", "embedding_ref", "wav_chunks",
+    "grid_uncertain",       # D-056, optional under 1.1
 }
 
 
@@ -48,8 +49,10 @@ def test_index_validates_and_has_every_field(song):
     assert doc["source"]["license"] == "unknown" and doc["source"]["title"] == "My Song"
     assert doc["analysis"]["bpm"] == 92.0 and doc["models"]["beat_tracker"]["name"] == "beat_this"
     assert doc["stages"]["organize"]["done"] is True and doc["stages"]["chop"]["done"] is True
+    assert doc["analysis"]["warnings"] == []                     # tracked, consistent grid
     for s in doc["samples"]:
         assert set(s) == SAMPLE_KEYS
+        assert s["grid_uncertain"] is None                       # the fixture's chops carry no grid note
         assert s["character"] is None and s["dedup_group"] is None and s["tags"] == []
         assert not s["path"].startswith("/") and "\\" not in s["path"]
         assert len(s["sha256"]) == 64
@@ -74,6 +77,35 @@ def test_sample_facts(song):
         assert x["lufs_measure"] in ("integrated", "short_term_padded")
     assert s["drums_loop_0001"]["lufs_measure"] == "integrated"        # 0.5 s >= 400 ms
     assert s["drums_oneshot_0001"]["lufs_measure"] == "short_term_padded"
+
+
+def test_uncertain_grid_reaches_the_index_and_validates(tmp_path):
+    # D-056: grid_uncertain per sample and analysis.warnings, both optional under schema 1.1
+    from grepchopflip.chop.common import read_chops_json, write_chops_json
+
+    s = make_song(tmp_path / "s")
+    ana = json.loads((s / "analysis.json").read_text())
+    ana.update(grid_source="normalized_half", grid_consistency=0.55)
+    (s / "analysis.json").write_text(json.dumps(ana))
+    notes = ["grid_source=normalized_half", "grid_consistency=0.55"]
+    for rel, cid in (("chops/drums/chops.json", "drums_loop_0001"), ("chops/bass/chops.json", "bassloop_1bar_001")):
+        doc = read_chops_json(s / rel)
+        for c in doc["chops"]:
+            if c["id"] == cid:
+                c["extra"].update(grid_uncertain=True, grid_notes=notes)
+        (s / rel).write_text(json.dumps(doc, indent=2))
+    org.organize(s)
+    doc = _index(s)
+    assert doc["analysis"]["warnings"] == [
+        "beat map uncertain: grid_source=normalized_half, grid_consistency=0.55; loop bar lines may be off by a beat"]
+    rows = {x["id"]: x for x in doc["samples"]}
+    assert rows["drums_loop_0001"]["grid_uncertain"] is True and rows["drums_loop_0001"]["needs_review"] is False
+    assert rows["bassloop_1bar_001"]["grid_uncertain"] is True and rows["bassloop_1bar_001"]["path"].startswith("loops/")
+    assert rows["drums_oneshot_0001"]["grid_uncertain"] is None
+    assert validate_index_file(s) == {"valid": True, "problems": [], "samples": 16}
+    assert CliRunner().invoke(app, ["index", str(s), "--validate"]).exit_code == 0
+    bad = dict(doc, analysis=dict(doc["analysis"], warnings="nope"))
+    assert any("warnings" in p for p in schema_errors(bad))
 
 
 def test_ids_are_made_unique_across_stems(tmp_path):

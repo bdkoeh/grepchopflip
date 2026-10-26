@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from grepchopflip.chop.common import Chop, bar_loops, read_chops_json, write_chops_json
+from grepchopflip.chop.common import Chop, bar_loops, grid_notes, read_chops_json, write_chops_json
 from grepchopflip.errors import InputError
 
 log = logging.getLogger("grepchopflip.chop")
@@ -121,6 +121,10 @@ def fingerprint(job: Job, params: dict) -> str:
             "grid_consistency": job.analysis.get("grid_consistency"),
             "grid_json_sha256": job.grid_sha256}
     loops = {"tolerance": LOOP_TOLERANCE, "fade_ms": LOOP_FADE_MS, "silence_rel_db": LOOP_SILENCE_REL_DB}
+    if "loops" in job.outputs:
+        loops["grid_uncertain"] = "note"      # D-056: grid trouble is a note, not a review reason
+    if job.folder == "melodic" and "phrases" in job.outputs:
+        loops["phrase_grid_notes"] = True     # D-056: grid-snapped melodic phrases carry the same note
     h.update(json.dumps([grid, loops, params], sort_keys=True).encode())
     return h.hexdigest()[:16]
 
@@ -207,15 +211,8 @@ def make_loops(job: Job, y: np.ndarray, sr: int, bars: tuple[int, ...], prefix: 
     chops: list[Chop] = []
     dropped = 0
     counter: dict[int, int] = {}
-    ana = job.analysis
-    # same wording as the drum loops (drums.py gate) so both stems report grid trouble identically
-    grid_reasons: list[str] = []
-    if ana.get("grid_source", "tracked") != "tracked":
-        grid_reasons.append(f"grid_source={ana.get('grid_source')}")
-    consistency = float(ana.get("grid_consistency", 1.0) or 0.0)
-    if consistency < 0.8:
-        grid_reasons.append(f"grid_consistency={consistency:.2f}")
-    shaky = bool(grid_reasons)
+    # D-056: an uncertain beat map is a note on the loop (same wording as the drum loops), not a review reason
+    notes = grid_notes(job.analysis)
     for s, e, n in bar_loops_for(job, dur, bars):
         if job.bpm:
             expect = n * job.beats_per_bar * 60.0 / job.bpm
@@ -241,11 +238,17 @@ def make_loops(job: Job, y: np.ndarray, sr: int, bars: tuple[int, ...], prefix: 
             source_end_s=round(b / sr, 6), path=rel, channels=seg.shape[1], sample_rate=sr, bars=n,
             start_beat=beat_position(job.beats_s, a / sr), length_beats=round((b - a) / sr / job.beat_s, 3),
             peak_dbfs=peak_dbfs(seg), rms_dbfs=rms_dbfs(seg), zero_snapped=True,
-            fade_in_ms=LOOP_FADE_MS, fade_out_ms=LOOP_FADE_MS, needs_review=shaky,
-            extra={"grid_start_s": round(s, 6), "grid": job.grid_source, "review_reasons": list(grid_reasons)},
+            fade_in_ms=LOOP_FADE_MS, fade_out_ms=LOOP_FADE_MS, needs_review=False,
+            extra={"grid_start_s": round(s, 6), "grid": job.grid_source, "review_reasons": [],
+                   **grid_extra(notes)},
         )
         chops.append(stamp(job, c, a, b))
     return chops, dropped
+
+
+def grid_extra(notes: list[str]) -> dict:
+    """`extra` fields of a chop cut on the beat grid (D-056)."""
+    return {"grid_uncertain": bool(notes), "grid_notes": list(notes)}
 
 
 def bar_loops_for(job: Job, dur: float, bars: tuple[int, ...]) -> list[tuple[float, float, int]]:

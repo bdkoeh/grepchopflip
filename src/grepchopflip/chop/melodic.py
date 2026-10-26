@@ -13,7 +13,7 @@ import numpy as np
 
 from grepchopflip.chop import runner
 from grepchopflip.chop.common import (
-    Chop, apply_fades, decay_end, fold_mono_if_correlated, load_stem, onset_samples, peak_dbfs,
+    Chop, apply_fades, decay_end, fold_mono_if_correlated, grid_notes, load_stem, onset_samples, peak_dbfs,
     peak_normalize, rms_dbfs, write_chop, zero_snap,
 )
 from grepchopflip.key import estimate_key_from_chroma
@@ -229,7 +229,9 @@ def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False
             length_beats=round((b - a) / sr / B, 3), peak_dbfs=peak_dbfs(seg), rms_dbfs=rms_dbfs(seg),
             extra={"starts_because": why, "key": f"{kd['key']} {kd['mode']}" if reliable else None,
                    "key_reliable": reliable, "key_confidence": kd["key_confidence"],
-                   "key_correlation": kd["key_correlation"], "source": "sound"},
+                   "key_correlation": kd["key_correlation"], "source": "sound",
+                   # D-056: phrase starts snap to the beat grid, so they share its uncertainty (a note only)
+                   **(runner.grid_extra(grid_notes(job.analysis)) if snap else {})},
         )
         chops.append(runner.stamp(job, c, a, b))
     chops = loops + chops
