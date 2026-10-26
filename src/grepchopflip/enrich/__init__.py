@@ -238,7 +238,8 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
     from grepchopflip import organize as org
     from grepchopflip.enrich import character, dedup, embed_clap, tagging_ast, wavchunks
     from grepchopflip.errors import InputError
-    from grepchopflip.index_schema import INDEX_NAME
+    from grepchopflip import layers
+    from grepchopflip.index_schema import INDEX_NAME, INDEX_SCHEMA_VERSION, SCHEMA_VERSIONS
     from grepchopflip.models import AST, CLAP
 
     t0 = time.perf_counter()
@@ -249,7 +250,7 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
     doc = org.read_json(song / INDEX_NAME)
     if not doc:
         raise InputError(f"no readable {INDEX_NAME} in {song}; run `gcf organize` first")
-    if doc.get("schema_version") not in ("1.0", "1.1") or not isinstance(doc.get("samples"), list):
+    if doc.get("schema_version") not in SCHEMA_VERSIONS or not isinstance(doc.get("samples"), list):
         raise InputError(f"{INDEX_NAME} has an unsupported schema_version {doc.get('schema_version')!r}")
     if not (doc.get("stages", {}).get("organize") or {}).get("done"):
         raise InputError(f"{song} is not organized yet; run `gcf organize` first")
@@ -275,6 +276,10 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
     if (not force and st.get("done") and st.get("input_key") == _input_key(doc["samples"], opts)
             and (not embed_on or (song / embed_clap.FILE).is_file())
             and all(org.file_sha256(song / r["path"]) == r["sha256"] for r in doc["samples"])):
+        if doc.get("schema_version") != INDEX_SCHEMA_VERSION or not layers.has_layers(doc):
+            # an index written before slice 12: add its layering partners (write_index runs layers.attach)
+            doc["schema_version"] = INDEX_SCHEMA_VERSION
+            org.write_index(song, doc)
         c = doc.get("counts") or counts(doc["samples"])
         return {"song_dir": str(song), "index": INDEX_NAME, "cached": True, "samples": c["total"],
                 "representatives": c["representatives"], "review": c["review"], "counts": c,
@@ -486,7 +491,7 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
     if licenses:
         models["licenses"] = licenses
     doc["models"] = models
-    doc["schema_version"] = "1.1"
+    doc["schema_version"] = INDEX_SCHEMA_VERSION    # write_index adds the layering partners (slice 12)
     doc["counts"] = counts(rows)
     doc["enrichment"] = {
         "version": VERSION,

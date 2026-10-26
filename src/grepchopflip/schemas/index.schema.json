@@ -2,17 +2,55 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grepchopflip.example/schemas/index.schema.json",
   "title": "gcf song index",
-  "description": "index.json at the root of one song folder: every organized sample with its facts. Every sample path is relative to the song folder (D-048), so the folder can be moved. Fields are nullable rather than missing. 1.1 (slice 7) adds the `gcf enrich` fields: per sample `character`, `features`, `class_confidence`, `classifier_class`, `dedup_group`, `is_dedup_representative`, `dedup_size`, `embedding_ref`, `wav_chunks` (null until `gcf enrich` runs), and top-level `counts` and `enrichment`. The curated set is the samples with `is_dedup_representative` true (D-050). 1.0 files still validate. Optional under 1.1 (D-056): `analysis.warnings` and per sample `grid_uncertain`.",
+  "description": "index.json at the root of one song folder: every organized sample with its facts. Every sample path is relative to the song folder (D-048), so the folder can be moved. Fields are nullable rather than missing. 1.1 (slice 7) adds the `gcf enrich` fields: per sample `character`, `features`, `class_confidence`, `classifier_class`, `dedup_group`, `is_dedup_representative`, `dedup_size`, `embedding_ref`, `wav_chunks` (null until `gcf enrich` runs), and top-level `counts` and `enrichment`. The curated set is the samples with `is_dedup_representative` true (D-050). 1.2 (slice 12) adds layering partners: per sample `bar_span` and `layers_with` (null for one-shots and words) and top-level `layers`. 1.0 and 1.1 files still validate. Optional under 1.1 and 1.2 (D-056): `analysis.warnings` and per sample `grid_uncertain`.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "generator", "created", "source", "analysis", "models", "params", "stages", "samples"],
-  "if": {"properties": {"schema_version": {"const": "1.1"}}},
-  "then": {
-    "required": ["counts", "enrichment"],
-    "properties": {"samples": {"items": {"required": ["features", "class_confidence", "classifier_class", "dedup_size", "embedding_ref", "wav_chunks"]}}}
-  },
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"enum": ["1.1", "1.2"]}}},
+      "then": {
+        "required": ["counts", "enrichment"],
+        "properties": {"samples": {"items": {"required": ["features", "class_confidence", "classifier_class", "dedup_size", "embedding_ref", "wav_chunks"]}}}
+      }
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": "1.2"}}},
+      "then": {
+        "required": ["layers"],
+        "properties": {"samples": {"items": {"required": ["bar_span", "layers_with"]}}}
+      }
+    }
+  ],
   "properties": {
-    "schema_version": {"enum": ["1.0", "1.1"]},
+    "schema_version": {"enum": ["1.0", "1.1", "1.2"]},
+    "layers": {
+      "type": "object",
+      "description": "1.2 (slice 12): how layering partners were found, and the bar spans with loops per stem. `stems` are the stems that produce loops in this folder. A span is `complete` when every stem that has loops of that bar count anywhere in the song has a loop at this span (bass, which loops only at 1 and 2 bars, is not required at 4). `phrases` are the phrases whose bar_span has the same `first` and `bars`: their length is whole bars within 0.25 beat, and their start may be up to about 2 beats off the downbeat (see their bar_span.phase_beats; -1.0 = starts a beat early).",
+      "additionalProperties": false,
+      "required": ["tolerance_ms", "same_bars_max_ms", "factors", "stems", "spans"],
+      "properties": {
+        "tolerance_ms": {"type": "number", "minimum": 0},
+        "same_bars_max_ms": {"type": "number", "minimum": 0},
+        "factors": {"type": "array", "items": {"type": "integer", "minimum": 2}},
+        "stems": {"type": "array", "items": {"type": "string"}},
+        "spans": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["first", "bars", "loops", "complete", "phrases"],
+            "properties": {
+              "first": {"type": "integer"},
+              "bars": {"type": "integer", "minimum": 1},
+              "loops": {"type": "object", "additionalProperties": {"type": "string"}},
+              "complete": {"type": "boolean"},
+              "phrases": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        }
+      }
+    },
     "counts": {
       "type": "object",
       "description": "Totals per class. `representatives` counts samples with is_dedup_representative true (null before `gcf enrich`).",
@@ -105,6 +143,19 @@
       "type": "object",
       "required": ["done"],
       "properties": {"done": {"type": "boolean"}}
+    },
+    "partners": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "factor", "drift_ms"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "factor": {"type": "integer", "minimum": 1},
+          "drift_ms": {"type": "number", "minimum": 0}
+        }
+      }
     },
     "relpath": {
       "type": "string",
@@ -209,6 +260,29 @@
           }
         },
         "tags": {"type": "array", "items": {"type": "string"}, "description": "Extra `tag`: top AudioSet labels (probability >= 0.1)."},
+        "bar_span": {
+          "type": ["object", "null"],
+          "description": "1.2: loops and phrases only. `first` = the bar the sample belongs to, `bars` = its whole-bar length (null for a phrase that is not whole bars), `phase_beats` = signed start offset from that bar's downbeat in beats (-1.0 = a one-beat pickup; null without a grid). Loops use their cut bar (`source_start_bar`). Phrases use the nearest downbeat, except that a start more than beats_per_bar/2 - 0.25 beats after a downbeat counts as a pickup into the next bar, so phase_beats lies in (-2.25, +1.75] in 4/4 and an exact half-bar start reads -2.0.",
+          "additionalProperties": false,
+          "required": ["first", "bars", "phase_beats"],
+          "properties": {
+            "first": {"type": "integer"},
+            "bars": {"type": ["integer", "null"], "minimum": 1},
+            "phase_beats": {"type": ["number", "null"]}
+          }
+        },
+        "layers_with": {
+          "type": ["object", "null"],
+          "description": "1.2: timing-compatible partners (loops and phrases; null for one-shots and words). Read same_bars first, then the lowest drift_ms. `factor` = how many times the shorter sample repeats to fill the longer one (1 for same_bars / same_length). drift_ms = length mismatch per cycle.",
+          "additionalProperties": false,
+          "required": ["same_bars", "same_length", "repeats_into", "holds"],
+          "properties": {
+            "same_bars": {"$ref": "#/$defs/partners"},
+            "same_length": {"$ref": "#/$defs/partners"},
+            "repeats_into": {"$ref": "#/$defs/partners"},
+            "holds": {"$ref": "#/$defs/partners"}
+          }
+        },
         "source_file": {"type": ["string", "null"]},
         "source_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}

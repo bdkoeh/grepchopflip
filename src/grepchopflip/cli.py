@@ -606,6 +606,95 @@ def enrich(
         raise typer.Exit(EXIT_PARTIAL)
 
 
+def _span_text(bs: dict | None) -> str:
+    if not bs:
+        return "-"
+    bars = bs.get("bars")
+    out = f"bar {bs['first']}" + (f" x{bars}" if bars else "")
+    ph = bs.get("phase_beats")
+    if ph is not None and abs(ph) >= 0.5:
+        out += f", starts {abs(ph):g} beat{'s' if abs(ph) != 1 else ''} {'early' if ph < 0 else 'late'}"
+    return out
+
+
+@app.command()
+def layers(
+    song_dir: Path = typer.Argument(..., help="Song folder with index.json."),
+    for_id: Optional[str] = typer.Option(None, "--for", help="Show the partners of this sample id."),
+    show_all: bool = typer.Option(False, "--all", help="Every sample, not only the representatives (D-050)."),
+    as_json: bool = typer.Option(False, "--json", help="Print the result as JSON on stdout."),
+) -> None:
+    """Layering partners: loops and phrases whose lengths fit together (same bars, same length, or a whole
+    number of repeats). Read same_bars first, then the lowest drift."""
+    from grepchopflip import layers as lay
+    from grepchopflip.index_schema import INDEX_NAME
+    from grepchopflip.organize import read_json
+
+    doc = read_json(song_dir / INDEX_NAME)
+    if not isinstance(doc.get("samples"), list):
+        err.print(f"error: no readable {INDEX_NAME} in {song_dir}; run `gcf organize` or `gcf index`",
+                  highlight=False, markup=False)
+        raise typer.Exit(EXIT_INPUT)
+    doc, computed = lay.ensure(doc)
+    if computed:
+        err.print(f"note: {INDEX_NAME} predates layers (schema {doc.get('schema_version')}); partners computed "
+                  "in memory; run `gcf index` to store them", highlight=False, markup=False)
+    if for_id is not None:
+        r = lay.partners_of(doc, for_id, show_all)
+        if r is None:
+            err.print(f"error: no sample with id {for_id!r} in {INDEX_NAME}", highlight=False, markup=False)
+            raise typer.Exit(EXIT_INPUT)
+        if as_json:
+            print(json.dumps({"song_dir": str(song_dir), "computed_in_memory": computed, **r}, indent=2,
+                             ensure_ascii=False))
+            return
+        mark = "  [review]" if r["needs_review"] else ""
+        print(f"{r['id']}  {r['class']} {r['stem']}  {_span_text(r['bar_span'])}  {r['duration_s']:.3f} s{mark}")
+        if not r["candidate"]:
+            print("  no partners: one-shots and words have no length constraint")
+            return
+        titles = {"same_bars": "same bars", "same_length": "same length", "repeats_into": "repeats into",
+                  "holds": "holds"}
+        for cat in lay.CATEGORIES:
+            es = r["groups"][cat]
+            if not es:
+                continue
+            print(f"{titles[cat]} ({len(es)})")
+            for e in es:
+                x = f" x{e['factor']}" if e["factor"] > 1 else ""
+                rev = "  [review]" if e["needs_review"] else ""
+                print(f"  {e['id']}{x}  {e['class']} {e['stem']}  {_span_text(e['bar_span'])}  "
+                      f"drift {e['drift_ms']:.2f} ms{rev}")
+        if not r["partners"]:
+            print("  no partners within the tolerance")
+        if r["hidden"]:
+            print(f"+{r['hidden']} near-duplicates hidden (--all shows them)")
+        return
+    o = lay.overview(doc, show_all)
+    if as_json:
+        print(json.dumps({"song_dir": str(song_dir), "computed_in_memory": computed, **o}, indent=2,
+                         ensure_ascii=False))
+        return
+    s = o["summary"]
+    print(f"layers: {s['loops']} loops ({o['view']}), partners per loop median {s['partners_per_loop_median']}, "
+          f"{s['loops_without_partners']} without; tolerance {o['tolerance_ms']} ms per cycle "
+          f"(same bars {o['same_bars_max_ms']} ms), factors {o['factors']}")
+    print(f"spans ({len(o['spans'])}; stems that loop: {', '.join(o['stems'] or []) or '-'})")
+    for sp in o["spans"]:
+        loops = "  ".join(f"{k}: {v}" for k, v in sp["loops"].items())
+        ph = f"  phrases: {', '.join(sp['phrases'])}" if sp["phrases"] else ""
+        print(f"  bar {sp['first']} x{sp['bars']}{'' if sp['complete'] else '  (incomplete)'}  {loops}{ph}")
+    print("samples (partners: same bars / same length / repeats into / holds)")
+    for it in o["samples"]:
+        c = it["counts"]
+        rev = "  [review]" if it["needs_review"] else ""
+        print(f"  {it['id']}  {it['class']} {it['stem']}  {_span_text(it['bar_span'])}  "
+              f"{c['same_bars']}/{c['same_length']}/{c['repeats_into']}/{c['holds']}{rev}")
+    if s["hidden_samples"]:
+        print(f"+{s['hidden_samples']} near-duplicates hidden (--all shows them)")
+    print("agents: read same_bars first, then the lowest drift_ms; factor = how many repeats")
+
+
 models_app = typer.Typer(help="Model downloads (checksummed, pinned revisions).", no_args_is_help=True)
 app.add_typer(models_app, name="models")
 

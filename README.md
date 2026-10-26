@@ -40,3 +40,31 @@ tag extra again to re-check them); `--no-embed` leaves an existing `embeddings/c
 The CLAP weights are the model owner's `pytorch_model.bin` (sha256-pinned, loaded with torch's safe
 weights-only loader); a `model.safetensors` exists only in unmerged conversion pull requests on Hugging
 Face, so it is not used.
+
+## Layering partners: which loops fit together (agents, read this)
+
+```bash
+gcf layers <song_folder>                 # spans, and partner counts per loop/phrase (representatives only)
+gcf layers <song_folder> --for <id>      # the partners of one sample; --all includes near-duplicates
+gcf layers <song_folder> --for <id> --json
+```
+
+Every loop and phrase in `index.json` (schema 1.2) has `layers_with`: the samples of the same song whose
+lengths fit it, so they can be played on top of each other without drifting. **Read `same_bars` first**
+(same start bar and bar count from another stem: the material was played together), **then the lowest
+`drift_ms`**. The lists:
+
+- `same_bars`: same bars, other stem (length within 5 ms);
+- `same_length`: equal length within 2 ms per cycle, from anywhere in the song;
+- `repeats_into`: this sample repeated `factor` times (2, 3, 4 or 8) matches the other one's length;
+- `holds`: the inverse, the other sample repeats `factor` times inside this one.
+
+Each entry is `{id, factor, drift_ms}`: `factor` is how many repeats (1 for same bars / same length),
+`drift_ms` the length mismatch per cycle. One-shots and words have `layers_with: null`. `bar_span` gives
+`{first, bars, phase_beats}`; a phrase with `phase_beats: -1.0` starts one beat before the bar (a pickup), so
+start it a beat early. A phrase belongs to its nearest downbeat, except that a start more than half a bar
+minus a quarter beat after a downbeat counts as a pickup into the next bar: in 4/4 `phase_beats` lies in
+(-2.25, +1.75], and an exact half-bar start reads -2.0. Top-level `layers` records the tolerances and maps each
+bar span to its loop id per stem (`complete`: every stem that has loops of that length is present). Partners are recomputed by `gcf organize` / `gcf index` (no audio is read); ids come from the index,
+never guess them. A loop player that loops two files independently drifts by up to `drift_ms` per cycle;
+retrigger per pattern (as the MPC does) or trim the partner to the exact multiple.

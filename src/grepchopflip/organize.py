@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import zlib
 from dataclasses import dataclass
@@ -31,7 +32,7 @@ from pathlib import Path, PurePosixPath
 import numpy as np
 import soundfile as sf
 
-from grepchopflip import __version__
+from grepchopflip import __version__, layers
 from grepchopflip.chop.common import grid_warning
 from grepchopflip.enrich import EMPTY_FIELDS, carry_over
 from grepchopflip.enrich import counts as enrich_counts
@@ -330,14 +331,7 @@ def read_state(song: Path) -> dict:
 
 
 def write_json_if_changed(p: Path, doc: dict, **dump) -> bool:
-    text = json.dumps(doc, **dump) + "\n"
-    try:
-        if p.read_text(encoding="utf-8") == text:
-            return False
-    except OSError:
-        pass
-    atomic_write(p, text)
-    return True
+    return write_text_if_changed(p, json.dumps(doc, **dump) + "\n")
 
 
 # ----------------------------------------------------------------------------- index
@@ -414,7 +408,8 @@ def make_index(song: Path, ctx: Context, docs: dict[Path, dict], rows: list[dict
     src, ana = ctx.source, ctx.analysis
     rows = sorted(rows, key=lambda r: r["path"])
     _unique_ids(rows)
-    return {
+    # slice 12: layering partners need unique ids; layers.attach adds them and `layers` (before `samples`)
+    return layers.attach({
         "schema_version": INDEX_SCHEMA_VERSION,
         "generator": {"name": "gcf", "version": __version__},
         "created": created or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -438,7 +433,50 @@ def make_index(song: Path, ctx: Context, docs: dict[Path, dict], rows: list[dict
         "counts": enrich_counts(rows),
         "enrichment": None,
         "samples": rows,
-    }
+    })
+
+
+_ONE_LINE = "\x00gcf-one-line-"      # placeholder prefix; json.dumps writes the NUL as \u0000
+
+
+def index_text(doc: dict) -> str:
+    """index.json text: indent=2, except that each layering partner entry, each `bar_span` and each
+    `layers.spans` entry sits on one line (keeps dense songs' indexes small; slice 12)."""
+    parts: list[str] = []
+
+    def one(v: object) -> str:
+        parts.append(json.dumps(v, ensure_ascii=False))
+        return f"{_ONE_LINE}{len(parts) - 1}"
+
+    out = dict(doc)
+    if isinstance(doc.get("samples"), list):
+        rows = []
+        for s in doc["samples"]:
+            if isinstance(s, dict) and (isinstance(s.get("layers_with"), dict) or isinstance(s.get("bar_span"), dict)):
+                s = dict(s)
+                if isinstance(s.get("bar_span"), dict):
+                    s["bar_span"] = one(s["bar_span"])
+                if isinstance(s.get("layers_with"), dict):
+                    s["layers_with"] = {k: [one(e) for e in v] if isinstance(v, list) else v
+                                        for k, v in s["layers_with"].items()}
+            rows.append(s)
+        out["samples"] = rows
+    if isinstance(doc.get("layers"), dict) and isinstance(doc["layers"].get("spans"), list):
+        out["layers"] = {**doc["layers"], "spans": [one(x) for x in doc["layers"]["spans"]]}
+    text = json.dumps(out, indent=2, ensure_ascii=False)
+    if parts:
+        text = re.sub(r'"\\u0000gcf-one-line-(\d+)"', lambda m: parts[int(m.group(1))], text)
+    return text + "\n"
+
+
+def write_text_if_changed(p: Path, text: str) -> bool:
+    try:
+        if p.read_text(encoding="utf-8") == text:
+            return False
+    except OSError:
+        pass
+    atomic_write(p, text)
+    return True
 
 
 def write_index(song: Path, doc: dict) -> bool:
@@ -447,9 +485,10 @@ def write_index(song: Path, doc: dict) -> bool:
     p = song / INDEX_NAME
     old = read_json(p)
     doc = carry_over(old, doc)
+    doc = layers.attach(doc)      # after carry_over: the span choice reads is_dedup_representative
     if old and {k: v for k, v in old.items() if k != "created"} == {k: v for k, v in doc.items() if k != "created"}:
         return False
-    return write_json_if_changed(p, doc, indent=2, ensure_ascii=False)
+    return write_text_if_changed(p, index_text(doc))
 
 
 def rebuild_index(song_dir: Path) -> dict:
