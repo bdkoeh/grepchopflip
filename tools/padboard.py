@@ -443,8 +443,12 @@ LEGACY_FOLDERS = ("drums", "bass", "melodic", "vocals", "words", "stems", "chops
 
 def _board_dir(root: Path, w: Path) -> Path | None:
     parts = w.relative_to(root).parts[:-1]
+    if any(p.startswith(".") for p in parts):  # hidden working files (stems/.grid drum parts, slice 13)
+        return None
     for i, p in enumerate(parts):
-        if p == "chops":                       # not organized yet: one board per stem folder
+        if p == "chops":                       # not organized yet: one board per folder directly under chops/
+            if i + 1 < len(parts):             # (chops/drums, chops/melodic, chops/inst, chops/vocals+bass, ...)
+                return root.joinpath(*parts[: i + 2])
             d = w.parent
             while d != root and d.name not in LEGACY_FOLDERS:
                 d = d.parent

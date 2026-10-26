@@ -357,13 +357,54 @@ def test_cli_partial_failure_exit_10(out_dir, monkeypatch):
         raise RuntimeError("kaput")
 
     real = cli._choppers()
-    monkeypatch.setattr(cli, "_choppers", lambda: {**real, "bass": boom})
+    monkeypatch.setattr(cli, "_choppers", lambda *split: {**real, "bass": boom})
     res = CliRunner().invoke(app, ["chop", str(out_dir), "--stems", "drums,bass", "--json"])
     assert res.exit_code == 10
     doc = json.loads(res.stdout)
     assert "drums" in doc["stems"] and "kaput" in doc["errors"]["bass"]
     res = CliRunner().invoke(app, ["chop", str(out_dir), "--stems", "bass", "--json"])
     assert res.exit_code == 3 and "bass" in json.loads(res.stdout)["errors"]
+
+
+def test_grid_only_step_writes_the_same_grid_json_as_a_full_split(tmp_path):
+    """Slice 13 golden test: drum parts hidden in stems/.grid/ give byte-identical chops/grid.json, and nothing
+    else is written (no one-shots, no loops)."""
+    import shutil
+
+    from grepchopflip.chop.drums import build_grid
+
+    full = make_out(tmp_path / "a")
+    sf.write(str(full / "stems" / "drums" / "kick.wav"), part_signal(seed=5), SR, subtype="PCM_24")
+    grid_only = tmp_path / "b" / "song"
+    (grid_only / "stems" / ".grid").mkdir(parents=True)
+    for p in (full / "stems" / "drums").glob("*.wav"):
+        shutil.copy(p, grid_only / "stems" / ".grid" / p.name)
+    shutil.copy(full / "analysis.json", grid_only / "analysis.json")
+
+    chop_drums(full)
+    r = build_grid(grid_only)
+    a = (full / "chops" / "grid.json").read_bytes()
+    assert a == (grid_only / "chops" / "grid.json").read_bytes()
+    assert r["moved"] > 0 and r["grid_json"] == "chops/grid.json" and r["cached"] is False
+    assert not list((grid_only / "chops").rglob("*.wav"))
+    assert build_grid(grid_only)["cached"] is True
+    assert build_grid(grid_only, force=True)["cached"] is False
+    assert (grid_only / "chops" / "grid.json").read_bytes() == a
+
+
+def test_grid_only_step_without_a_reliable_tempo_writes_no_grid(tmp_path):
+    import shutil
+
+    from grepchopflip.chop.drums import build_grid
+
+    src = make_out(tmp_path / "a", reliable=False)
+    (src / "stems" / ".grid").mkdir()
+    shutil.copy(src / "stems" / "drums" / "snare.wav", src / "stems" / ".grid" / "snare.wav")
+    r = build_grid(src)
+    assert r["grid_json"] is None and r["skipped_reason"] == "tempo_reliable is false"
+    assert not (src / "chops" / "grid.json").exists()
+    with pytest.raises(Exception, match="no drum parts"):
+        build_grid(tmp_path / "a" / "song", parts_dir=tmp_path / "nowhere")
 
 
 def test_cli_restores_logger_level(out_dir):

@@ -88,6 +88,36 @@ def test_uncertain_grid_notes_melodic_loops_and_phrases_without_review(tmp_path)
         assert c["extra"]["grid_notes"] == ["grid_source=normalized_half", "grid_consistency=0.55"]
 
 
+def test_melodic_fingerprint_unchanged_by_the_slice13_refactor(tmp_path):
+    # value produced by main @ dec7d6b (before chop_loops_phrases was factored out) on this exact fixture;
+    # chops.json and all 23 WAVs were also byte-identical between the two (VERIFICATION.md, slice 13)
+    root = write_job(tmp_path, {"other": _other()}, SECONDS)
+    chop_melodic(root, force=True)
+    doc = json.loads((root / "chops/melodic/chops.json").read_text())
+    assert doc["params"]["fingerprint"] == "b5996e34ec62da81"
+    assert doc["stage"] == "chop.melodic" and {c["stem"] for c in doc["chops"]} == {"other"}
+
+
+def test_combined_group_gets_loops_and_phrases_only(tmp_path):
+    from grepchopflip.chop.melodic import chop_group
+    from grepchopflip.chop.registry import chopper
+
+    root = write_job(tmp_path, {"inst": _other(), "vocals+bass+other": _other()}, SECONDS)
+    r = chopper("inst")(root, sensitivity=0.5, force=False)
+    doc = json.loads((root / "chops/inst/chops.json").read_text())
+    assert {c["kind"] for c in doc["chops"]} == {"loop", "phrase"} and r["total"] == len(doc["chops"])
+    assert {c["stem"] for c in doc["chops"]} == {"inst"}
+    assert all(c["path"].startswith(("chops/inst/loops/instloop_", "chops/inst/phrases/instphrase_"))
+               for c in doc["chops"])
+    assert all(c["source_file"] == "stems/inst.wav" for c in doc["chops"])
+    assert doc["params"]["group"] == "inst" and doc["stage"] == "chop.group.inst"
+    assert chopper("inst")(root)["cached"] is True
+    chop_group(root, "vocals+bass+other")
+    assert (root / "chops/vocals+bass+other/chops.json").is_file()
+    sub = {p.name for p in (root / "chops" / "inst").iterdir() if p.is_dir()}
+    assert sub == {"loops", "phrases"}                                   # no one-shots from mixed material
+
+
 def test_fast_chord_changes_do_not_make_two_beat_phrases(tmp_path):
     y = np.zeros(int(16 * SR), dtype=np.float32)
     a, b = [220.0, 261.63, 329.63], [233.08, 293.66, 349.23]

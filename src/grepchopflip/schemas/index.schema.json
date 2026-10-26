@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grepchopflip.example/schemas/index.schema.json",
   "title": "gcf song index",
-  "description": "index.json at the root of one song folder: every organized sample with its facts. Every sample path is relative to the song folder (D-048), so the folder can be moved. Fields are nullable rather than missing. 1.1 (slice 7) adds the `gcf enrich` fields: per sample `character`, `features`, `class_confidence`, `classifier_class`, `dedup_group`, `is_dedup_representative`, `dedup_size`, `embedding_ref`, `wav_chunks` (null until `gcf enrich` runs), and top-level `counts` and `enrichment`. The curated set is the samples with `is_dedup_representative` true (D-050). 1.2 (slice 12) adds layering partners: per sample `bar_span` and `layers_with` (null for one-shots and words) and top-level `layers`. 1.0 and 1.1 files still validate. Optional under 1.1 and 1.2 (D-056): `analysis.warnings` and per sample `grid_uncertain`.",
+  "description": "index.json at the root of one song folder: every organized sample with its facts. Every sample path is relative to the song folder (D-048), so the folder can be moved. Fields are nullable rather than missing. 1.1 (slice 7) adds the `gcf enrich` fields: per sample `character`, `features`, `class_confidence`, `classifier_class`, `dedup_group`, `is_dedup_representative`, `dedup_size`, `embedding_ref`, `wav_chunks` (null until `gcf enrich` runs), and top-level `counts` and `enrichment`. The curated set is the samples with `is_dedup_representative` true (D-050). 1.2 (slice 12) adds layering partners: per sample `bar_span` and `layers_with` (null for one-shots and words) and top-level `layers`. 1.0 and 1.1 files still validate. Optional under 1.1 and 1.2 (D-056): `analysis.warnings` and per sample `grid_uncertain`. Slice 13 extends 1.2 without a version bump: optional top-level `separation`, and the `stem`/`class` enums include the combined groups (`inst`, `mix`, `vocals+bass+other`, ... / `InstLoop`, `Inst`, `MixLoop`, ...).",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "generator", "created", "source", "analysis", "models", "params", "stages", "samples"],
@@ -119,6 +119,31 @@
       }
     },
     "models": {"type": "object"},
+    "separation": {
+      "type": "object",
+      "description": "Slice 13 (optional in 1.2; written by every gcf that knows it): what was separated. `split` is the canonical --split (`all`, `none`, or groups such as `vocals,drums+bass+other`); `groups` lists the stems this folder has, in order (`isolated` = one member, with its full pipeline: drum parts and one-shots, bass notes, vocal words; combined groups get loops and phrases only). `method`: `sum` = group stems are float sums of the separated stems (they miss the separator's residual, about 21-27 dB below the mix), `source` = the original file (split `none`). `drum_grid`: `parts` = drum parts under stems/drums/, `hidden-parts` = drum parts kept under stems/.grid/ only to correct the downbeats (chops/grid.json); every group's loops cut on that grid.",
+      "additionalProperties": false,
+      "required": ["split", "groups", "method"],
+      "properties": {
+        "split": {"type": "string", "minLength": 1},
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "members", "isolated"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "members": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"enum": ["vocals", "drums", "bass", "other"]}},
+              "isolated": {"type": "boolean"}
+            }
+          }
+        },
+        "method": {"enum": ["sum", "source"]},
+        "drum_grid": {"enum": ["parts", "hidden-parts"]}
+      }
+    },
     "params": {
       "type": "object",
       "additionalProperties": false,
@@ -175,10 +200,10 @@
       "properties": {
         "id": {"type": "string", "minLength": 1},
         "path": {"$ref": "#/$defs/relpath"},
-        "stem": {"enum": ["drums", "bass", "other", "vocals"]},
+        "stem": {"enum": ["drums", "bass", "other", "vocals", "vocals+drums", "vocals+bass", "vocals+other", "drums+bass", "drums+other", "bass+other", "vocals+drums+bass", "vocals+drums+other", "vocals+bass+other", "inst", "mix"], "description": "The group the sample was cut from: one of the four separated stems, or (slice 13) a combined group named after its members (`inst` = drums+bass+other, `mix` = the whole record); see top-level `separation`."},
         "part": {"enum": ["kick", "snare", "toms", "hh", "ride", "crash", null]},
         "kind": {"enum": ["oneshot", "loop", "phrase", "word"]},
-        "class": {"enum": ["Kick", "Snare", "Tom", "Hat", "Ride", "Crash", "Perc", "Bass", "DrumLoop", "BassLoop", "MelLoop", "Mel", "Vox", "Word"]},
+        "class": {"enum": ["Kick", "Snare", "Tom", "Hat", "Ride", "Crash", "Perc", "Bass", "DrumLoop", "BassLoop", "MelLoop", "Mel", "Vox", "Word", "VoxDrumLoop", "VoxDrum", "VoxBassLoop", "VoxBass", "VoxMelLoop", "VoxMel", "DrumBassLoop", "DrumBass", "DrumMelLoop", "DrumMel", "BassMelLoop", "BassMel", "VoxDrumBassLoop", "VoxDrumBass", "VoxDrumMelLoop", "VoxDrumMel", "VoxBassMelLoop", "VoxBassMel", "InstLoop", "Inst", "MixLoop", "Mix"], "description": "Combined groups (slice 13): member codes Vox/Drum/Bass/Mel joined in the order vocals, drums, bass, other (Inst = drums+bass+other, Mix = all four); `...Loop` for loops, the bare code for phrases."},
         "needs_review": {"type": "boolean"},
         "review_reasons": {"type": "array", "items": {"type": "string"}},
         "grid_uncertain": {"type": ["boolean", "null"], "description": "Optional (D-056). True when this loop or phrase was cut on an uncertain beat map (see analysis.warnings); its bar lines may be off by a beat, but it is not sent to review for that. False when cut on a sound grid; null for samples not cut on the beat grid."},

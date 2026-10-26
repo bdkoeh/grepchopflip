@@ -40,6 +40,8 @@ from grepchopflip.enrich.wavchunks import TMP_SUFFIX as CHUNK_TMP_SUFFIX
 from grepchopflip.errors import InputError
 from grepchopflip.index_schema import INDEX_NAME, INDEX_SCHEMA_VERSION
 from grepchopflip.loudness import Levels, measure
+from grepchopflip.paths import folder_split
+from grepchopflip.split import class_code, is_group_name, members_of
 
 log = logging.getLogger("grepchopflip.organize")
 
@@ -90,8 +92,21 @@ CLASS_FOLDER = {
     "DrumLoop": "loops/drums", "BassLoop": "loops/bass", "MelLoop": "loops/melodic",
     "Mel": "phrases/melodic", "Vox": "phrases/vocals", "Word": "words/vocals",
 }
-LOOP_CLASSES = ("DrumLoop", "BassLoop", "MelLoop")
+LOOP_CLASSES = ("DrumLoop", "BassLoop", "MelLoop")     # the default split's; every class ending in Loop is a loop
 ROOT_MIN_CONFIDENCE = 0.5
+
+
+def is_loop_class(cls: str) -> bool:
+    return cls.endswith("Loop")
+
+
+def class_folder(cls: str, stem: str | None = None) -> str:
+    """Folder of a class (D-031). Combined groups (slice 13): `loops/<group>` and `phrases/<group>`."""
+    if cls in CLASS_FOLDER:
+        return CLASS_FOLDER[cls]
+    if stem and is_group_name(stem) and len(members_of(stem)) > 1:
+        return f"{'loops' if is_loop_class(cls) else 'phrases'}/{stem}"
+    return CLASS_FOLDER["Perc"]
 
 
 # ----------------------------------------------------------------------------- records and context
@@ -160,8 +175,19 @@ def load_context(song: Path) -> Context:
 
 # ----------------------------------------------------------------------------- classes, names
 
+def _combined(stem) -> tuple[str, ...] | None:
+    """Members of a combined group stem (`inst`, `vocals+bass`, `mix`), else None."""
+    if isinstance(stem, str) and is_group_name(stem):
+        m = members_of(stem)
+        return m if len(m) > 1 else None
+    return None
+
+
 def classify(c: dict) -> str:
     kind, stem = c.get("kind"), c.get("stem")
+    group = _combined(stem)
+    if group and kind in ("loop", "phrase"):
+        return class_code(group, kind)          # slice 13: InstLoop / Inst, VoxBassLoop / VoxBass, MixLoop / Mix
     if kind == "oneshot":
         if stem == "bass":
             return "Bass"
@@ -186,9 +212,10 @@ def facts(c: dict, ctx: Context) -> dict:
     cls = classify(c)
     extra = c.get("extra") or {}
     key = mode = None
-    if cls == "MelLoop":
+    combined = _combined(c.get("stem")) is not None
+    if cls == "MelLoop" or (combined and is_loop_class(cls)):
         key, mode = ctx.key, ctx.mode
-    elif cls == "Mel" and extra.get("key") and extra.get("key_reliable"):
+    elif (cls == "Mel" or (combined and c.get("kind") == "phrase")) and extra.get("key") and extra.get("key_reliable"):
         try:
             key, mode = parse_key(str(extra["key"]))
         except ValueError:
@@ -197,16 +224,17 @@ def facts(c: dict, ctx: Context) -> dict:
     if cls in ("Bass", "Vox") and c.get("root_note") and (c.get("root_confidence") or 0) >= ROOT_MIN_CONFIDENCE:
         root = c["root_note"]
     bpm = ctx.bpm if c.get("kind") in ("loop", "phrase") else None
-    return {"cls": cls, "folder": CLASS_FOLDER[cls], "bpm": bpm, "key": key, "mode": mode, "root": root,
-            "review": bool(c.get("needs_review"))}
+    return {"cls": cls, "folder": class_folder(cls, c.get("stem")), "bpm": bpm, "key": key, "mode": mode,
+            "root": root, "review": bool(c.get("needs_review"))}
 
 
 def build_name(cls: str, num: int, width: int, c: dict, f: dict) -> str:
-    """`Kick_01`, `DrumLoop_03_2bar_92bpm`, `Bass_04_F#1`, `Vox_05_phrase_92bpm_B4` (without extension)."""
+    """`Kick_01`, `DrumLoop_03_2bar_92bpm`, `Bass_04_F#1`, `Vox_05_phrase_92bpm_B4`, `InstLoop_03_4bar_92bpm_Am`
+    (without extension)."""
     head = f"{cls}_{num:0{width}d}"
-    if cls in LOOP_CLASSES and c.get("bars"):
+    if is_loop_class(cls) and c.get("bars"):
         head += f"_{int(c['bars'])}bar"
-    elif cls in ("Mel", "Vox"):
+    elif c.get("kind") == "phrase":
         head += "_phrase"
     optional = []
     if f["bpm"]:
@@ -242,7 +270,7 @@ def plan_names(recs: list[Rec], ctx: Context) -> dict[int, tuple[dict, str]]:
     used: set[str] = set()
     for cls in sorted(by_cls):
         items = sorted(by_cls[cls], key=lambda t: (
-            int(t[0].chop.get("bars") or 0) if cls in LOOP_CLASSES else 0,
+            int(t[0].chop.get("bars") or 0) if is_loop_class(cls) else 0,
             float(t[0].chop.get("source_start_s") or 0.0), str(t[0].chop.get("id", ""))))
         width = 3 if len(items) > 99 else 2
         for n, (r, f) in enumerate(items, 1):
@@ -393,7 +421,7 @@ def _stages(song: Path, docs: dict[Path, dict], organized: bool, bit_depth: int,
         chop_files[p.relative_to(song).as_posix()] = {
             "stage": d.get("stage"), "total": len(d["chops"]),
             "fingerprint": (d.get("params") or {}).get("fingerprint")}
-    stems_ok = all((song / "stems" / f"{s}.wav").is_file() for s in ("drums", "bass", "other", "vocals"))
+    stems_ok = all((song / "stems" / f"{s}.wav").is_file() for s in folder_split(song).names)
     return {
         "separate": {"done": stems_ok},
         "analyze": {"done": bool(ctx.analysis), "gcf_version": ctx.analysis.get("gcf_version")},
@@ -428,6 +456,8 @@ def make_index(song: Path, ctx: Context, docs: dict[Path, dict], rows: list[dict
             "warnings": [w for w in [grid_warning(ana)] if w],
         },
         "models": ana.get("models") or {},
+        # slice 13: what was separated (one split per song folder); stems in `samples` are these group names
+        "separation": folder_split(song).describe(),
         "params": {"bit_depth": bit_depth, "normalize": "peak"},
         "stages": _stages(song, docs, organized, bit_depth, ctx),
         "counts": enrich_counts(rows),

@@ -91,5 +91,52 @@ def make_song(root: Path, with_words: bool = True, drop: tuple[str, ...] = ()) -
     return root
 
 
+def make_split_song(root: Path, split: str = "vocals", many_loops: int = 2) -> Path:
+    """Slice 13: a song folder of a non-default split. Every combined group gets loops (1, 2 and 4 bars) and
+    phrases; isolated vocals a phrase; source.json and stems/.done.json record the split."""
+    from grepchopflip.chop.melodic import group_tag
+    from grepchopflip.split import parse_split
+
+    sp = parse_split(split)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "source.json").write_text(json.dumps({
+        "path": "/music/My_Song.wav", "name": "My_Song.wav", "sha256": SHA, "duration_s": 30.0,
+        "sample_rate": 44100, "channels": 2, "frames": 1323000, "format": "wav", **sp.record()}), encoding="utf-8")
+    beat = 60 / 92
+    beats = [round(i * beat, 4) for i in range(40)]
+    (root / "analysis.json").write_text(json.dumps({
+        "bpm": 92.0, "bpm_confidence": 0.9, "tempo_reliable": True, "grid_source": "tracked",
+        "grid_consistency": 0.95, "beats_s": beats, "downbeats_s": beats[::4], "beats_per_bar": 4,
+        "key": "A", "mode": "minor", "key_reliable": True, "key_confidence": 0.4,
+        "models": {"beat_tracker": {"name": "beat_this"}}, "gcf_version": "0.1.0.dev0"}), encoding="utf-8")
+    (root / "stems").mkdir(exist_ok=True)
+    (root / "stems" / ".done.json").write_text(json.dumps({"params": {"split": sp.spec}, **sp.record()}))
+    for n in sp.names:
+        wav(root, f"stems/{n}.wav", 0.1)
+    (root / "chops").mkdir(exist_ok=True)
+    p = {"fingerprint": "f"}
+    bar = 4 * beat
+    seed = 100
+    for g in sp.combined:
+        t = group_tag(g)
+        cs = []
+        for bars in (1, 2, 4):
+            for k in range(many_loops):
+                seed += 1
+                cs.append(chop(root, f"{t}loop_{bars}bar_{k + 1:03d}", g, "loop",
+                               f"chops/{g}/loops/{t}loop_{bars}bar_{k + 1:03d}.wav", round(k * bar * bars, 4),
+                               seed=seed, bars=bars, seconds=round(bars * bar, 4), channels=2,
+                               review=(bars == 2 and k == 0)))
+        cs.append(chop(root, f"{t}phrase_0001", g, "phrase", f"chops/{g}/phrases/{t}phrase_0001.wav", 0.0,
+                       seed=seed + 1, seconds=round(2 * bar, 4), channels=2, length_beats=8.0,
+                       extra={"key": "A minor", "key_reliable": True}))
+        write_chops_json(root / "chops" / g / "chops.json", cs, p, f"chop.group.{g}")
+    if sp.isolated("vocals"):
+        vox = [chop(root, "vox_0001", "vocals", "phrase", "chops/vocals/phrases/vox_0001.wav", 0.0, seed=30,
+                    seconds=round(2 * bar, 4), length_beats=8.0)]
+        write_chops_json(root / "chops" / "vocals" / "chops.json", vox, p, "chop.vocals")
+    return root
+
+
 def tree(root: Path) -> list[str]:
     return sorted(q.relative_to(root).as_posix() for q in root.rglob("*.wav") if "stems" not in q.parts)

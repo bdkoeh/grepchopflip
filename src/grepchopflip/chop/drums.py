@@ -326,6 +326,29 @@ def _chop_part(part: str, y: np.ndarray, sr: int, sensitivity: float,
 
 # ----------------------------------------------------------------------------- loops
 
+TIER_NAMES = ("kick_snare", "other_parts", "review_hits")
+
+
+def _empty_tiers() -> dict[str, list[float]]:
+    return {t: [] for t in TIER_NAMES}
+
+
+def _hit_tier(part: str, review: bool) -> str:
+    """Which grid tier a hit's audible-attack time feeds: review-flagged hits last, kick/snare first."""
+    if review:
+        return "review_hits"
+    return "kick_snare" if part in GRID_PARTS else "other_parts"
+
+
+def _tier_list(tiers: dict[str, list[float]]) -> list[tuple[str, list[float]]]:
+    return [(t, sorted(tiers[t])) for t in TIER_NAMES]
+
+
+def _write_grid(path: Path, grid: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(grid, indent=2) + "\n", encoding="utf-8")
+
+
 def _grid(analysis: dict, tiers: list[tuple[str, list[float]]]) -> dict:
     """Correct each tracked downbeat to the nearest hit, trying onset tiers in order (kick/snare first,
     then the other parts, then review-flagged hits). A downbeat that no tier can place stays at the
@@ -523,9 +546,7 @@ def chop_drums(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> 
 
     chops: list[Chop] = []
     dropped: dict[str, dict[str, int]] = {}
-    grid_onsets: list[float] = []          # kick/snare, clean
-    grid_onsets_other: list[float] = []    # toms/hh/ride/crash, clean
-    grid_onsets_review: list[float] = []   # any part, review-flagged
+    tiers = _empty_tiers()
     n_shot = 0
     for part, path in part_paths.items():
         y, sr = common.load_stem(path)
@@ -541,13 +562,7 @@ def chop_drums(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> 
             rpath = f"chops/drums/{'review' if review else 'oneshots'}/{part}/{part}_{k:04d}.wav"
             common.write_chop(out_dir / rpath, h["audio"], sr)
             att_s = h["attack"] / sr
-            q_s = h["pre_attack"] / sr                      # loops cut at the start of the audible attack
-            if review:
-                grid_onsets_review.append(q_s)
-            elif part in GRID_PARTS:
-                grid_onsets.append(q_s)
-            else:
-                grid_onsets_other.append(q_s)
+            tiers[_hit_tier(part, review)].append(h["pre_attack"] / sr)   # loops cut at the audible attack
             beats = np.asarray(analysis.get("beats_s", []), dtype=float)
             dbs = np.asarray(analysis.get("downbeats_s", []), dtype=float)
             start_beat = bar = None
@@ -572,13 +587,11 @@ def chop_drums(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> 
     median_offset = None
     if make_loops:
         drums, sr = common.load_stem(drums_path)
-        grid = _grid(analysis, [("kick_snare", sorted(grid_onsets)), ("other_parts", sorted(grid_onsets_other)),
-                                ("review_hits", sorted(grid_onsets_review))])
+        grid = _grid(analysis, _tier_list(tiers))
         moved = [o for o, t, c in zip(grid["offsets_ms"], grid["downbeats_s_tracked"],
                                       grid["downbeats_s_corrected"]) if abs(o) > 1e-9]
         median_offset = round(float(np.median(grid["offsets_ms"])), 3) if grid["offsets_ms"] else None
-        grid_path.parent.mkdir(parents=True, exist_ok=True)
-        grid_path.write_text(json.dumps(grid, indent=2) + "\n", encoding="utf-8")
+        _write_grid(grid_path, grid)
         ldrop: dict[str, int] = {}
         src = rel(drums_path)
         loops = _loop_chops(drums, sr, analysis, grid, ldrop, (src, sha[src]))
@@ -600,3 +613,64 @@ def chop_drums(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> 
     common.write_chops_json(chops_json, chops, params, stage="drums")
     cache.mark_done(base, input_key, settings)
     return _summarize(common.read_chops_json(chops_json), out_dir, False, loops_skipped)
+
+
+# ----------------------------------------------------------------------------- grid only (slice 13)
+
+GRID_STAGE_DIR = ".grid"        # chops/.grid/.done.json: the grid-only step's cache record
+
+
+def build_grid(out_dir: Path, sensitivity: float = 0.5, force: bool = False, parts_dir: Path | None = None) -> dict:
+    """Grid-only drum step: when drums are inside a combined group (or the split is `none`), the drum parts
+    live hidden in `stems/.grid/`. This finds their hits exactly as `chop_drums` does and writes only
+    `chops/grid.json` (the same bytes a full split would write from the same parts), so every group's loops
+    cut on the hit-corrected downbeats. No one-shots, no loops. Cached in `chops/.grid/.done.json`."""
+    out_dir = Path(out_dir)
+    pdir = Path(parts_dir) if parts_dir else out_dir / "stems" / ".grid"
+    analysis_path = out_dir / "analysis.json"
+    part_paths = {p: pdir / f"{p}.wav" for p in PARTS if (pdir / f"{p}.wav").is_file()}
+    if not analysis_path.is_file():
+        raise InputError(f"{analysis_path} not found; run `gcf analyze` first")
+    if not part_paths:
+        raise InputError(f"no drum parts under {pdir}; run `gcf separate` first")
+    sensitivity = float(min(1.0, max(0.0, sensitivity)))
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    grid_path = out_dir / "chops" / "grid.json"
+    stage_dir = out_dir / "chops" / GRID_STAGE_DIR
+    rel = lambda p: p.relative_to(out_dir).as_posix()      # noqa: E731
+    settings = {**_settings(sensitivity), "step": "grid-only"}
+    inputs = {**{rel(p): sha256_file(p) for p in part_paths.values()}, "analysis.json": sha256_file(analysis_path)}
+    input_key = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+    reliable = bool(analysis.get("tempo_reliable"))
+
+    def summary(cached: bool, grid: dict | None) -> dict:
+        offs = (grid or {}).get("offsets_ms") or []
+        return {"stem": "grid", "cached": cached, "grid_json": rel(grid_path) if grid else None,
+                "skipped_reason": None if reliable else "tempo_reliable is false",
+                "downbeats": len(offs), "moved": sum(1 for o in offs if abs(o) > 1e-9),
+                "grid_median_offset_ms": round(float(np.median(offs)), 3) if offs else None,
+                "parts": sorted(part_paths), "total": 0, "counts": {},
+                "paths": {"chops_dir": rel(stage_dir), "grid_json": rel(grid_path)}}
+
+    outputs = [grid_path] if reliable else []
+    if cache.is_done(stage_dir, input_key, settings, outputs, force):
+        log.info("grid cached: %s", grid_path)
+        grid = json.loads(grid_path.read_text(encoding="utf-8")) if reliable else None
+        return summary(True, grid)
+    cache.clear_done(stage_dir)
+    grid_path.unlink(missing_ok=True)
+    grid = None
+    if reliable:
+        tiers = _empty_tiers()
+        for part, path in part_paths.items():
+            y, sr = common.load_stem(path)
+            for h in _chop_part(part, y, sr, sensitivity, {}):
+                tiers[_hit_tier(part, bool(h["reasons"]))].append(h["pre_attack"] / sr)
+        grid = _grid(analysis, _tier_list(tiers))
+        _write_grid(grid_path, grid)
+        log.info("grid only: %d downbeats, %d moved to a hit", len(grid["offsets_ms"]),
+                 sum(1 for o in grid["offsets_ms"] if abs(o) > 1e-9))
+    else:
+        log.info("grid only: tempo unreliable, no grid.json (loops are skipped anyway)")
+    cache.mark_done(stage_dir, input_key, settings)
+    return summary(False, grid)

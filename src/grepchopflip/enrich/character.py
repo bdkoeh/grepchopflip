@@ -338,7 +338,7 @@ def thresholds(items: list[dict]) -> dict:
             pool, name = by_kind[members[0]["kind"]], f"kind:{members[0]['kind']}"
         t: dict = {"pool": name, "n": len(pool)}
         for axis, _hi, _lo in AXES:
-            if axis == "duration_s" and cls in NO_DURATION_WORDS:
+            if axis == "duration_s" and (cls in NO_DURATION_WORDS or cls.endswith("Loop")):  # loops of any group
                 t[axis] = None
                 continue
             t[axis] = _pct([p.get(axis) for p in pool])

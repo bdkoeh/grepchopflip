@@ -447,3 +447,106 @@ def test_bass_review_reason_reaches_index_json(song):
     s = _by_id(song)[shot["id"]]
     assert s["needs_review"] is True and s["review_reasons"] == ["pitch_spread=2.25st"]
     assert s["path"].startswith("review/")
+
+
+# ---------------------------------------------------------------- slice 13: combined groups
+
+
+def _organized(tmp_path, split):
+    from orgfix import make_split_song
+
+    s = make_split_song(tmp_path / split.replace(",", "_").replace("+", "-"), split)
+    r = org.organize(s)
+    return s, r, json.loads((s / "index.json").read_text())
+
+
+def test_vocals_out_gives_inst_loops_and_phrases_next_to_vocal_phrases(tmp_path):
+    from grepchopflip.index_schema import validate_index_file
+
+    s, r, doc = _organized(tmp_path, "vocals")
+    t = tree(s)
+    assert "loops/inst/InstLoop_01_1bar_92bpm_Am.wav" in t
+    assert "loops/inst/InstLoop_03_2bar_92bpm_Am.wav" not in t            # 2-bar loop 1 is flagged for review
+    assert "review/loops/inst/InstLoop_03_2bar_92bpm_Am.wav" in t        # review subtree mirrors the folders
+    assert "phrases/inst/Inst_01_phrase_92bpm_Am.wav" in t
+    assert "phrases/vocals/Vox_01_phrase_92bpm.wav" in t
+    assert not any(p.startswith(("oneshots/", "loops/drums", "loops/melodic")) for p in t)
+    assert {x["class"] for x in doc["samples"]} == {"InstLoop", "Inst", "Vox"}
+    assert {x["stem"] for x in doc["samples"]} == {"inst", "vocals"}
+    assert doc["separation"] == {"split": "vocals,drums+bass+other", "method": "sum", "drum_grid": "hidden-parts",
+                                 "groups": [{"name": "vocals", "members": ["vocals"], "isolated": True},
+                                            {"name": "inst", "members": ["drums", "bass", "other"],
+                                             "isolated": False}]}
+    assert doc["stages"]["separate"]["done"] is True
+    assert validate_index_file(s)["valid"] is True
+    assert CliRunner().invoke(app, ["index", str(s), "--validate"]).exit_code == 0
+    # slice 12 partners work across groups: a 2-bar inst loop and the 2-bar vocal phrase of the same length
+    inst2 = next(x for x in doc["samples"] if x["class"] == "InstLoop" and x["bars"] == 2 and not x["needs_review"])
+    vox = next(x for x in doc["samples"] if x["class"] == "Vox")
+    assert vox["id"] in {e["id"] for c in inst2["layers_with"].values() for e in c}
+    assert doc["layers"]["stems"] == ["inst"]
+    assert org.organize(s)["cached"] is True
+
+
+def test_none_gives_mix_loops(tmp_path):
+    from grepchopflip.index_schema import validate_index_file
+
+    s, r, doc = _organized(tmp_path, "none")
+    assert {x["class"] for x in doc["samples"]} == {"MixLoop", "Mix"}
+    assert all(x["path"].startswith(("loops/mix/", "phrases/mix/", "review/loops/mix/")) for x in doc["samples"])
+    assert doc["separation"]["method"] == "source" and doc["separation"]["groups"][0]["name"] == "mix"
+    assert validate_index_file(s)["valid"] is True
+
+
+def test_plus_group_names_and_classes(tmp_path):
+    from grepchopflip.index_schema import validate_index_file
+
+    s, r, doc = _organized(tmp_path, "vocals+other,drums+bass")
+    assert {x["class"] for x in doc["samples"]} == {"VoxMelLoop", "VoxMel", "DrumBassLoop", "DrumBass"}
+    t = tree(s)
+    assert "loops/vocals+other/VoxMelLoop_01_1bar_92bpm_Am.wav" in t
+    assert "phrases/drums+bass/DrumBass_01_phrase_92bpm_Am.wav" in t
+    assert all(len(p.rsplit("/", 1)[1]) <= org.MAX_NAME for p in t)
+    assert validate_index_file(s)["valid"] is True
+
+
+def test_three_digit_numbering_for_the_longest_combined_class(tmp_path):
+    from orgfix import make_split_song
+
+    s = make_split_song(tmp_path / "s", "vocals+drums+bass,other", many_loops=40)   # 120 VoxDrumBassLoop
+    org.organize(s)
+    names = [p.rsplit("/", 1)[1] for p in tree(s) if "VoxDrumBassLoop" in p]
+    assert len(names) == 120 and all(len(n) <= org.MAX_NAME for n in names)
+    assert "VoxDrumBassLoop_001_1bar_92bpm_Am.wav" in names              # 37 characters: the key still fits
+
+
+def test_unknown_stem_or_class_fails_validation_and_old_indexes_still_validate(song):
+    from grepchopflip.index_schema import schema_errors
+
+    org.organize(song)
+    doc = json.loads((song / "index.json").read_text())
+    assert doc["separation"]["split"] == "all" and not schema_errors(doc)
+    bad = json.loads(json.dumps(doc))
+    bad["samples"][0]["stem"] = "drums+bass+other"                        # must be spelled `inst`
+    assert any("stem" in e for e in schema_errors(bad))
+    bad = json.loads(json.dumps(doc))
+    bad["samples"][0]["class"] = "InstLoops"
+    assert any("class" in e for e in schema_errors(bad))
+    bad = json.loads(json.dumps(doc))
+    bad["separation"]["method"] = "model"
+    assert schema_errors(bad)
+    # 1.2 without `separation` (written before slice 13), 1.1 and 1.0 shapes all still validate
+    old = json.loads(json.dumps(doc))
+    del old["separation"]
+    assert not schema_errors(old)
+    old["schema_version"] = "1.1"
+    del old["layers"]
+    for x in old["samples"]:
+        del x["bar_span"], x["layers_with"]
+    assert not schema_errors(old)
+    old["schema_version"] = "1.0"
+    del old["counts"], old["enrichment"]
+    for x in old["samples"]:
+        for k in ("features", "class_confidence", "classifier_class", "dedup_size", "embedding_ref", "wav_chunks"):
+            del x[k]
+    assert not schema_errors(old)
