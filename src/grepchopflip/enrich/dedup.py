@@ -39,8 +39,17 @@ THRESHOLDS_DB: dict[str, float] = {
 }
 
 
+#: slice 13: loops and phrases of combined groups (InstLoop, Inst, VoxBassLoop, MixLoop, ...) are mixed tonal
+#: material like MelLoop/Mel, so they share its threshold until the owner's ear says otherwise
+COMBINED_THRESHOLD_DB = 6.0
+
+
 def threshold_for(cls: str) -> float:
-    return THRESHOLDS_DB.get(cls, DEFAULT_THRESHOLD_DB)
+    if cls in THRESHOLDS_DB:
+        return THRESHOLDS_DB[cls]
+    from grepchopflip.split import COMBINED_CLASSES
+
+    return COMBINED_THRESHOLD_DB if cls in COMBINED_CLASSES else DEFAULT_THRESHOLD_DB
 
 
 def _logmel(y: np.ndarray, sr: int) -> np.ndarray:

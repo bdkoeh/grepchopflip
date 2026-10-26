@@ -64,6 +64,7 @@ class RunContext:
     duration_s: float | None = None
     settings: list[dict] = field(default_factory=list)   # reserved [settings] tables (slice 11), untouched
     warnings: list[str] = field(default_factory=list)
+    split: str = "all"                 # canonical --split (slice 13); one per song folder
 
 
 class StageSkipped(Exception):
@@ -80,8 +81,10 @@ StageFn = Callable[[RunContext], dict]
 # ----------------------------------------------------------------------------- input
 
 
-def resolve_input(path: Path, library: Path | str | None = None, out: Path | None = None) -> tuple[Path, Path | None]:
-    """(song folder, source audio or None) for a song file or an existing song folder. Raises InputError."""
+def resolve_input(path: Path, library: Path | str | None = None, out: Path | None = None,
+                  split: str | None = None) -> tuple[Path, Path | None]:
+    """(song folder, source audio or None) for a song file or an existing song folder. Raises InputError.
+    A song file's folder carries the split (`<name>-<hash8>-split-<token>`, slice 13); a folder is taken as is."""
     from grepchopflip.audio_io import sha256_file
     from grepchopflip.config import library_dir
     from grepchopflip.errors import InputError
@@ -100,7 +103,7 @@ def resolve_input(path: Path, library: Path | str | None = None, out: Path | Non
         raise InputError(f"cannot read {p}: permission denied")
     if out:
         return Path(out).expanduser().resolve(), p.resolve()
-    return (library_dir(library) / song_slug(p, sha256_file(p))).resolve(), p.resolve()
+    return (library_dir(library) / song_slug(p, sha256_file(p), split)).resolve(), p.resolve()
 
 
 def _source_audio(folder: Path) -> Path | None:
@@ -113,20 +116,27 @@ def _source_audio(folder: Path) -> Path | None:
     return None
 
 
-def _stem_files(folder: Path) -> list[Path]:
-    from grepchopflip.separate import DRUM_PARTS, STEM_NAMES
+def _stem_files(folder: Path, split: str | None = None) -> list[Path]:
+    """Every file a finished separation of `split` (default: the folder's recorded split) leaves in the folder."""
+    from grepchopflip.paths import folder_split
+    from grepchopflip.separate import output_files
 
-    s = folder / "stems"
-    return [s / f"{n}.wav" for n in STEM_NAMES] + [s / "drums" / f"{n}.wav" for n in DRUM_PARTS]
+    return output_files(folder, split if split is not None else folder_split(folder))
 
 
-def _all_stems(folder: Path) -> bool:
-    return all(p.is_file() for p in _stem_files(folder))
+def _all_stems(folder: Path, split: str | None = None) -> bool:
+    return all(p.is_file() for p in _stem_files(folder, split))
+
+
+def _chop_folder(name: str) -> str:
+    """Folder under chops/ of a chop step's output (`other` keeps its historical `melodic`)."""
+    return {"other": "melodic"}.get(name, name)
 
 
 def recorded_settings(folder: Path) -> dict:
     """Settings an earlier run of this song folder used, so a plain rerun hits the caches instead of redoing
-    work with defaults: separation model (--fast), chop sensitivity, organize bit depth."""
+    work with defaults: separation model (--fast), chop sensitivity, organize bit depth. (The split is adopted
+    separately in `_run`: it decides the folder.)"""
     out: dict = {}
     try:
         done = json.loads((folder / "stems" / ".done.json").read_text(encoding="utf-8"))
@@ -137,8 +147,9 @@ def recorded_settings(folder: Path) -> dict:
         pass
     # sensitivity: adopted only when every chopped stem recorded the same value
     sens: set[float] = set()
-    records = [folder / "chops" / "drums" / ".done.json",
-               *(folder / "chops" / sub / "chops.json" for sub in ("bass", "melodic", "vocals"))]
+    chops = folder / "chops"
+    records = [chops / "drums" / ".done.json", chops / ".grid" / ".done.json",
+               *(sorted(p for p in chops.glob("*/chops.json") if p.parent.name != "drums") if chops.is_dir() else [])]
     for rec in records:
         try:
             prm = json.loads(rec.read_text(encoding="utf-8")).get("params", {})
@@ -155,6 +166,31 @@ def recorded_settings(folder: Path) -> dict:
     except (OSError, ValueError, AttributeError):
         pass
     return out
+
+
+def decide_split(folder: Path, requested: str, source: str, warnings: list[str]) -> tuple[str, str]:
+    """(split, where it came from) for a run in `folder`. A folder that records a split keeps it (one split per
+    folder, D-054): a plain rerun adopts it; a split from a config file that differs is overridden with a
+    warning; a --split flag or GCF_SPLIT that differs is refused (ConfigError, exit 2) with the folder's split
+    named, because re-splitting in place is not supported."""
+    from grepchopflip import config as cfg
+    from grepchopflip.paths import recorded_split
+
+    rec = recorded_split(folder)
+    if rec is None or rec.spec == requested:
+        return requested, source
+    explicit = source == "flag" or source.startswith("env:")
+    if explicit:
+        how = "--split" if source == "flag" else f"${source.split(':', 1)[1]}"
+        raise cfg.ConfigError(
+            f"{how} {requested}: {folder.name} holds split {rec.spec!r}; re-splitting a folder in place is not "
+            f"supported. Run the song file with --split {requested} (it gets its own folder), or drop --split to "
+            f"rerun this folder as {rec.spec}")
+    if source != "default":
+        warnings.append(f"split {requested} from {source} ignored: {folder.name} holds split {rec.spec}")
+    else:
+        warnings.append(f"using split={rec.spec} as recorded in {folder.name}")
+    return rec.spec, "recorded"
 
 
 def _duration(ctx: RunContext) -> float | None:
@@ -182,14 +218,15 @@ def stage_separate(ctx: RunContext) -> dict:
     from grepchopflip.errors import InputError
 
     if ctx.audio is None:
-        if _all_stems(ctx.out_dir):
+        if _all_stems(ctx.out_dir, ctx.split):
             why = ("--force cannot redo separation: the source audio is gone" if ctx.force
                    else "source audio not found")
             ctx.warnings.append(f"separate: {why}; keeping the existing stems")
             return {"cached": True, "note": f"{why}; existing stems kept"}
         raise InputError(f"source audio for {ctx.out_dir} not found (source.json path); cannot separate")
-    r = sep.separate(ctx.audio, ctx.out_dir, fast=ctx.fast, device=ctx.device, force=ctx.force)
-    return {"cached": bool(r["cached"]), "recorded_seconds": r.get("seconds") or {}}
+    r = sep.separate(ctx.audio, ctx.out_dir, fast=ctx.fast, device=ctx.device, force=ctx.force, split=ctx.split)
+    ctx.warnings.extend(f"separate: {w}" for w in r.get("warnings") or [])
+    return {"cached": bool(r["cached"]), "recorded_seconds": r.get("seconds") or {}, "split": r.get("split")}
 
 
 def _stat(p: Path):
@@ -222,18 +259,24 @@ def _chop_total(r: dict) -> int | None:
 
 
 def stage_chop(ctx: RunContext) -> dict:
-    """Every stem whose file exists (drums first: it writes chops/grid.json the other loops reuse), then extras.
-    One stem failing does not stop the others; the stage is `partial` then."""
-    from grepchopflip.chop.registry import CHOP_STEMS, chopper
+    """Every stem of the folder's split whose file exists (grid step / drums first: they write chops/grid.json
+    the other loops reuse; combined groups last), then extras. One stem failing does not stop the others; the
+    stage is `partial` then. An extra whose stem is not isolated in the split is skipped with a reason."""
+    from grepchopflip.chop.registry import chop_steps, chopper, extra_skip_reason
     from grepchopflip.errors import InputError
 
-    wanted = [s for s in CHOP_STEMS if (ctx.out_dir / "stems" / f"{s}.wav").is_file()]
+    wanted = chop_steps(ctx.split, ctx.out_dir)
     if not wanted:
         raise InputError(f"no stems under {ctx.out_dir / 'stems'} to chop")
     results: dict[str, dict] = {}
     errors: dict[str, str] = {}
     exceptions: list[BaseException] = []
     for name in [*wanted, *(f"extra:{e}" for e in ctx.extras)]:
+        why = extra_skip_reason(name.split(":")[-1], ctx.split) if name.startswith("extra:") else None
+        if why:
+            results[name] = {"skipped": True, "reason": why, "cached": False, "total": 0}
+            ctx.warnings.append(f"chop {name}: {why}")
+            continue
         fn = chopper(name.split(":")[-1])
         try:
             r = fn(ctx.out_dir, sensitivity=ctx.sensitivity, force=ctx.force)
@@ -519,13 +562,22 @@ def run_stages(ctx: RunContext, stages: dict[str, StageFn] | None = None, progre
     return RunResult(out, errors, first, time.perf_counter() - t_all)
 
 
+def _chop_marker(folder: Path) -> bool:
+    from grepchopflip.paths import folder_split
+
+    sp = folder_split(folder)
+    if sp.isolated("drums"):
+        return (folder / "chops" / "drums" / ".done.json").is_file()
+    return (folder / "chops" / _chop_folder(sp.names[-1]) / "chops.json").is_file()
+
+
 def _marker_exists(folder: Path, stage: str) -> bool:
     from grepchopflip.analyze import DONE_FILE
 
     return {
         "separate": (folder / "stems" / ".done.json").is_file(),
         "analyze": (folder / DONE_FILE).is_file(),
-        "chop": (folder / "chops" / "drums" / ".done.json").is_file(),
+        "chop": _chop_marker(folder),
         "organize": (folder / ".organize.json").is_file() and (folder / "index.json").is_file(),
         "enrich": False,
     }[stage]
@@ -578,13 +630,14 @@ def plan(ctx: RunContext, stages: tuple[str, ...] = STAGE_ORDER, onsets: bool = 
             continue
         if name == "separate":
             if ctx.audio is None:
-                ok = _all_stems(folder)
+                ok = _all_stems(folder, ctx.split)
                 put(name, not ok, "source audio missing; existing stems kept" if ok else "source audio missing")
             else:
                 from grepchopflip import separate as sep
 
-                done = cache.is_done(folder / "stems", sha256_path(ctx.audio), sep._params(ctx.fast), _stem_files(folder))
-                put(name, not done, "stems cached" if done else "no matching stems/.done.json")
+                done = cache.is_done(folder / "stems", sha256_path(ctx.audio), sep._params(ctx.fast, ctx.split),
+                                     _stem_files(folder, ctx.split))
+                put(name, not done, "stems cached" if done else f"no matching stems/.done.json; {_separate_words(ctx.split)}")
         elif name == "analyze":
             if upstream_runs:
                 put(name, True, "after separation")
@@ -598,8 +651,9 @@ def plan(ctx: RunContext, stages: tuple[str, ...] = STAGE_ORDER, onsets: bool = 
             if upstream_runs:
                 put(name, True, "after separation")
             else:
-                ok = _chops_look_done(folder)
+                ok = _chops_look_done(folder)            # by the folder's recorded split
                 put(name, not ok, "chops cached (if the analysis is unchanged)" if ok else "not chopped yet")
+            out[name]["groups"] = _chop_words(ctx.split)
         elif name == "organize":
             if upstream_runs:
                 put(name, True, "after chop")
@@ -613,20 +667,52 @@ def plan(ctx: RunContext, stages: tuple[str, ...] = STAGE_ORDER, onsets: bool = 
                 out[name] = {"action": "skip", "reason": "enrich is not part of this gcf install"}
         if out[name]["action"] == "run" and name in ("separate", "chop"):
             upstream_runs = True
-    doc = {"dry_run": True, "input": str(ctx.input_path), "out_dir": str(folder), "stages": out,
-           "estimate": estimate_samples(ctx) if onsets else None}
+    from grepchopflip.split import parse_split
+
+    sp = parse_split(ctx.split)
+    doc = {"dry_run": True, "input": str(ctx.input_path), "out_dir": str(folder),
+           "split": {"spec": sp.spec, "groups": list(sp.names), "separate": _separate_words(sp)},
+           "stages": out, "estimate": estimate_samples(ctx) if onsets else None}
     return doc
 
 
-def _chops_look_done(folder: Path) -> bool:
-    from grepchopflip.chop.common import read_chops_json
+def _separate_words(split) -> str:
+    """What separation does for a split, in a few words (dry run)."""
+    from grepchopflip.split import parse_split
 
+    sp = parse_split(split)
+    if sp.is_all:
+        return "pass 1 (4 stems) + pass 2 (drum parts)"
+    if sp.is_none:
+        return "copy source to stems/mix.wav; passes 1 and 2 run only for the beat grid (hidden parts)"
+    sums = ", ".join(sp.combined)
+    grid = "pass 2 for the drum parts" if sp.isolated("drums") else "pass 2 for the grid (hidden parts)"
+    return f"pass 1 + sum ({sums}) + {grid}"
+
+
+def _chop_words(split) -> dict[str, str]:
+    from grepchopflip.chop.registry import chop_order, what_it_gets
+
+    return {n: what_it_gets(n) for n in chop_order(split)}
+
+
+def _chops_look_done(folder: Path, split: str | None = None) -> bool:
+    from grepchopflip.chop.common import read_chops_json
+    from grepchopflip.chop.registry import GRID_STEP, chop_order
+    from grepchopflip.paths import folder_split
+
+    from grepchopflip.split import parse_split
+
+    sp = parse_split(split) if split is not None else folder_split(folder)
     if not (folder / "chops" / "drums" / ".done.json").is_file() and (folder / "stems" / "drums.wav").is_file():
         return False
-    for stem, sub in (("drums", "drums"), ("bass", "bass"), ("other", "melodic"), ("vocals", "vocals")):
-        if not (folder / "stems" / f"{stem}.wav").is_file():
+    if sp.drum_parts_hidden and (folder / "stems" / ".grid").is_dir() \
+            and not (folder / "chops" / ".grid" / ".done.json").is_file():
+        return False                                  # the grid-only step has not run yet
+    for stem in chop_order(sp):
+        if stem == GRID_STEP or not (folder / "stems" / f"{stem}.wav").is_file():
             continue
-        cj = folder / "chops" / sub / "chops.json"
+        cj = folder / "chops" / _chop_folder(stem) / "chops.json"
         try:
             doc = read_chops_json(cj)
         except (OSError, ValueError):
@@ -789,10 +875,12 @@ def _run(a: dict, stages: dict[str, StageFn] | None, st: dict, emit_failure) -> 
     # pass 1 without the song folder: decides the library, hence where the song folder is
     c1 = cfg.resolve_run_config(flags, cwd=cwd, explicit=explicit)
     out = Path(a["out"]) if a.get("out") else None
-    folder, audio = resolve_input(song, c1["library"], out)
+    folder, audio = resolve_input(song, c1["library"], out, split=str(c1["split"]))
     st["out_dir"] = folder
+    split, split_src = decide_split(folder, str(c1["split"]), c1.sources["split"], warnings)
     conf = cfg.resolve_run_config(flags, song_dir=folder if explicit is None else None, cwd=cwd,
-                                  explicit=explicit, ignore_file_keys=("library", "cache_dir"))
+                                  explicit=explicit, ignore_file_keys=("library", "cache_dir", "split"))
+    conf.values["split"], conf.sources["split"] = split, split_src
     if conf["cache_dir"] is not None:  # the final value; process-level, the environment is left alone
         cfg.set_cache_dir_override(conf["cache_dir"])
     warnings.extend(conf.warnings)
@@ -809,6 +897,7 @@ def _run(a: dict, stages: dict[str, StageFn] | None, st: dict, emit_failure) -> 
         input_path=song, out_dir=folder, audio=audio, fast=bool(conf["fast"]), device=str(conf["device"]),
         sensitivity=float(conf["sensitivity"]), extras=list(conf["extras"]), tag=conf["tag"], embed=conf["embed"],
         bit_depth=int(conf["bit_depth"]), force=bool(a.get("force")), settings=conf.settings, warnings=warnings,
+        split=split,
     )
 
     if a.get("dry_run"):
@@ -835,7 +924,7 @@ def _run(a: dict, stages: dict[str, StageFn] | None, st: dict, emit_failure) -> 
 
     s = sm.build(input_path=str(song), out_dir=folder, stages=result.stages, warnings=warnings,
                  errors=result.errors, exit_code=code, status=status, total_s=time.perf_counter() - t0,
-                 config=conf.to_dict(), index=index)
+                 config=conf.to_dict(), index=index, split=split)
     for w in warnings:
         _say(f"warning: {w}", quiet)
     print(sm.to_json(s, index, full) if as_json else sm.to_plain(s), flush=True)

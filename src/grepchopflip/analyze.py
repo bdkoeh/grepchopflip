@@ -18,13 +18,12 @@ from grepchopflip.beats import AudioReadError, analyze_beats, load_mono
 from grepchopflip.config import library_dir
 from grepchopflip.key import NOTES, estimate_key, null_key, parse_key, relative_key
 from grepchopflip.models import BEAT_THIS_SHA256
-from grepchopflip.paths import song_slug
+from grepchopflip.paths import folder_split, missing_folder_hint, song_slug
 
 ANALYSIS_FILE = "analysis.json"
 DONE_FILE = "analysis_done.json"  # distinct from slice 2's stems/.done.json
 SCHEMA_VERSION = 1
-HARMONIC_STEMS = ("bass", "other", "vocals")
-ALL_STEMS = ("vocals", "drums", "bass", "other")
+HARMONIC_STEMS = ("bass", "other", "vocals")      # members the key stems must cover (slice 13: see key_stems)
 _SOURCE_KEYS = ("path", "source_path", "file", "input", "audio", "original")
 _AUDIO_EXT = {".wav", ".flac", ".ogg", ".mp3", ".m4a", ".aiff", ".aif", ".opus", ".aac"}
 
@@ -95,26 +94,45 @@ def _loudness(y: np.ndarray) -> dict:
 
 
 def _resolve_inputs(audio_or_out: Path | str, out_dir: Path | str | None, library: Path | str | None = None):
-    """Return (out_dir, mix_paths, key_stems, stems). mix_paths: files whose sum is the full mix."""
+    """Return (out_dir, mix_paths, stems, split). mix_paths: files whose sum is the full mix; stems: the folder's
+    group stems that exist (names follow the folder's recorded split, slice 13)."""
     p = Path(audio_or_out)
     if p.is_dir():
         out = Path(out_dir) if out_dir else p
+        sp = folder_split(p)
         src = _find_source_audio(p)
-        stems = _stem_paths(p, ALL_STEMS)
+        stems = _stem_paths(p, sp.names)
         if src is not None:
             mix = [src]
-        elif len(stems) == len(ALL_STEMS):
-            mix = [stems[n] for n in ALL_STEMS]
+        elif len(stems) == len(sp.names):
+            # no source audio: the group stems summed (for `none` that is stems/mix.wav itself)
+            mix = [stems[n] for n in sp.names]
         else:
             raise AudioReadError(
-                f"{p} has no source audio (source.json/source.*) and not all four stems (stems/*.wav)"
+                f"{p} has no source audio (source.json/source.*) and not every stem of its split "
+                f"{sp.spec} (stems/{{{','.join(sp.names)}}}.wav)"
             )
-        return out, mix, stems
+        return out, mix, stems, sp
     if not p.is_file():
         raise AudioReadError(f"Input not found: {p}")
-    # Same folder rule as `gcf separate` (paths.song_slug), so analyze finds the stems it produced.
+    # Same folder rule as `gcf separate` (paths.song_slug), so analyze finds the stems it produced. A song file
+    # without -o means the default split's folder; for other splits pass the folder (or -o).
     out = Path(out_dir) if out_dir else library_dir(library) / song_slug(p, sha256_path(p))
-    return out, [p], _stem_paths(out, ALL_STEMS)
+    if not out_dir:
+        hint = missing_folder_hint(out)
+        if hint:
+            _log(f"hint: {hint}")
+    sp = folder_split(out)
+    return out, [p], _stem_paths(out, sp.names), sp
+
+
+def key_stems(stems: dict[str, Path], sp) -> dict[str, Path]:
+    """The stems the key is read from: every group without drums, when together they cover vocals, bass and
+    other (for `all` that is bass + other + vocals, as before; `drums,rest` uses vocals+bass+other). Otherwise
+    (`vocals,rest`, `none`, any split that puts drums with a harmonic stem) {} and the key comes from the mix."""
+    free = {n: stems[n] for n, g in zip(sp.names, sp.groups) if "drums" not in g and n in stems}
+    covered = {m for n, g in zip(sp.names, sp.groups) if n in free for m in g}
+    return free if set(HARMONIC_STEMS) <= covered else {}
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -151,9 +169,9 @@ def _cache_inputs(audio_or_out, out_dir, bpm_override, key_override, library) ->
     if bpm_override is not None and not bpm_override > 0:
         raise ValueError("--bpm must be positive")
     key_ov = parse_key(key_override) if key_override else None
-    out, mix_paths, stems = _resolve_inputs(audio_or_out, out_dir, library)
-    key_stem_paths = {n: p for n, p in stems.items() if n in HARMONIC_STEMS}
-    use_stems_for_key = set(key_stem_paths) == set(HARMONIC_STEMS)
+    out, mix_paths, stems, sp = _resolve_inputs(audio_or_out, out_dir, library)
+    key_stem_paths = key_stems(stems, sp)
+    use_stems_for_key = bool(key_stem_paths)
     params = {
         "bpm_override": bpm_override,
         "key_override": list(key_ov) if key_ov else None,
@@ -242,7 +260,7 @@ def analyze(
              "key_confidence_method": "override", "key_alternative": {"key": alt[0], "mode": alt[1]}}
     else:
         if use_stems_for_key:
-            _log("Estimating key from bass + other + vocals stems")
+            _log(f"Estimating key from the drum-free stems ({' + '.join(key_stem_paths)})")
             ky, ksr = _mix(list(key_stem_paths.values()))
         else:
             _log("Estimating key from the full mix")

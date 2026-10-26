@@ -5,7 +5,9 @@ Summary shape (stable keys; values may be null):
 
     {
       "gcf_version": "...", "status": "ok|partial|failed|nothing|dry_run", "exit_code": 0,
-      "input": "<path given>", "out_dir": "<song folder>", "index": "<song folder>/index.json" | null,
+      "input": "<path given>", "out_dir": "<song folder>",
+      "split": "vocals,drums+bass+other" | null, "groups": ["vocals", "inst"] | null,     (slice 13)
+      "index": "<song folder>/index.json" | null,
       "samples": 898, "review": 120,
       "counts": {"class": {"Kick": 40, ...}, "kind": {"oneshot": 700, ...}, "folder": {"oneshots/kick": 30, ...}},
       "analysis": {"bpm": 92.0, "tempo_reliable": true, "key": "A", "mode": "minor"},
@@ -48,17 +50,24 @@ def counts(index: dict | None) -> dict:
 
 def build(*, input_path: str | None, out_dir: Path | None, stages: dict[str, dict], warnings: list[str],
           errors: list[dict], exit_code: int, status: str, total_s: float, config: dict | None = None,
-          index: dict | None = None) -> dict:
+          index: dict | None = None, split: str | None = None) -> dict:
     rows = (index or {}).get("samples") or []
     ana = (index or {}).get("analysis") or {}
     seconds = {k: v.get("seconds") for k, v in stages.items()}
     seconds["total"] = round(total_s, 2)
+    groups = None
+    if split is not None:
+        from grepchopflip.split import parse_split
+
+        groups = list(parse_split(split).names)
     return {
         "gcf_version": __version__,
         "status": status,
         "exit_code": exit_code,
         "input": input_path,
         "out_dir": str(out_dir) if out_dir else None,
+        "split": split,            # slice 13: canonical --split of the song folder (null when unknown)
+        "groups": groups,          # its stems, e.g. ["vocals", "inst"]
         "index": str(Path(out_dir) / INDEX_NAME) if index is not None and out_dir else None,
         "samples": len(rows),
         "review": sum(1 for r in rows if r.get("needs_review")),
@@ -99,6 +108,8 @@ def to_plain(summary: dict) -> str:
     lines = [f"gcf run: {summary['status']}  ({summary['seconds']['total']:.1f}s)"]
     if summary.get("out_dir"):
         lines.append(f"out: {summary['out_dir']}")
+    if summary.get("split"):
+        lines.append(f"split: {summary['split']} (stems: {', '.join(summary.get('groups') or [])})")
     if summary.get("index"):
         lines.append(f"index: {summary['index']}  ({summary['samples']} samples, {summary['review']} to review)")
     lines.append("stages: " + ", ".join(_stage_word(n, s) for n, s in summary["stages"].items()))
@@ -112,8 +123,13 @@ def to_plain(summary: dict) -> str:
 
 def plan_to_plain(plan: dict) -> str:
     lines = [f"gcf run --dry-run: {plan['input']}", f"out: {plan['out_dir']}"]
+    sp = plan.get("split")
+    if sp:
+        lines.append(f"split: {sp['spec']} (groups: {', '.join(sp['groups'])})")
     for name, s in plan["stages"].items():
         lines.append(f"  {name}: {s['action']}" + (f"  ({s['reason']})" if s.get("reason") else ""))
+        if s.get("groups"):
+            lines.append("    " + ", ".join(f"{g}: {w}" for g, w in s["groups"].items()))
     est = plan.get("estimate") or {}
     if est.get("samples") is not None:
         lines.append(f"estimated samples: ~{est['samples']} (range {est['low']}-{est['high']}, "

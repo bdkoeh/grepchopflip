@@ -76,10 +76,11 @@ RUN_KEYS: dict[str, tuple[str, str]] = {
     "embed": ("bool", "GCF_EMBED"),
     "bit_depth": ("int", "GCF_BIT_DEPTH"),
     "progress": ("str", "GCF_PROGRESS"),
+    "split": ("split", "GCF_SPLIT"),       # slice 13; decides the song folder, so a song folder's gcf.toml cannot set it
 }
 DEFAULTS: dict[str, object] = {
     "library": None, "cache_dir": None, "fast": False, "device": "cuda", "sensitivity": 0.5, "extras": [],
-    "tag": None, "embed": None, "bit_depth": 24, "progress": "auto",
+    "tag": None, "embed": None, "bit_depth": 24, "progress": "auto", "split": "all",
 }
 
 
@@ -123,6 +124,12 @@ def _coerce(key: str, value: object, where: str, base: Path | None = None) -> ob
                 raise ValueError("expected a path")
             p = Path(value).expanduser()
             v = p if p.is_absolute() or base is None else (base / p)
+        elif kind == "split":
+            from grepchopflip.split import parse_split
+
+            if not isinstance(value, str):
+                raise ValueError("expected text such as all, none, vocals or drums,rest")
+            v = parse_split(value).spec          # canonical; SplitError is a ValueError
         else:
             if not isinstance(value, str):
                 raise ValueError("expected text")

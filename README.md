@@ -16,6 +16,40 @@ gcf info
 
 `gcf info` reports your GPU, CUDA and torch versions and tells you what to fix if something is off.
 
+## Separation depth: what gets split (`--split`)
+
+```bash
+gcf run song.wav --split vocals         # vocals out, the rest stays together: stems vocals + inst
+gcf run song.wav --split none           # no separation: the record itself, as loops and phrases
+gcf run song.wav --split drums,rest     # drums apart (with parts and one-shots) + vocals+bass+other
+gcf run song.wav --split vocals+other,drums+bass
+```
+
+`--split` (on `run` and `separate`; also `$GCF_SPLIT` or `split = "..."` in a config file) decides **what
+exists**; `gcf chop --stems` picks **among what exists**. Grammar: `all` (default, the four stems apart),
+`none`, or groups of `vocals`, `drums`, `bass`, `other` joined with `+` and separated by `,`; `rest` (or anything
+left out) is one more group, so `vocals` means `vocals,rest`. Group names: `inst` = drums+bass+other, `mix` =
+all four, otherwise the members joined with `+` (`vocals+bass+other`).
+
+- Isolated stems keep their full pipelines (drum parts and one-shots, bass notes, vocal phrases and words).
+  Combined groups get 1/2/4-bar loops and phrases only: `loops/inst/InstLoop_03_4bar_92bpm_Am.wav`,
+  `phrases/inst/Inst_05_phrase_92bpm.wav`, `loops/mix/MixLoop_...`, `loops/vocals+bass+other/VoxBassMelLoop_...`.
+- Every group cuts on the same hit-corrected beat grid as a full split: the drum-part pass always runs and,
+  when drums are not a stem of their own, its parts stay hidden in `stems/.grid/` and only feed
+  `chops/grid.json`. A `none` run still runs the separator silently for that grid.
+- A combined group is the float sum of the separated stems. The four stems do not add back up to the record
+  (they miss a residual about 21-27 dB below the mix), so `none` uses the original file (`stems/mix.wav`), and
+  `index.json` `separation.method` says `sum` or `source`.
+- One split per song folder: other splits get their own folder (`<name>-<hash8>-split-v-dbo`,
+  `-split-none`). After `gcf separate song.wav --split X`, give later commands (`gcf analyze`, `gcf chop`,
+  `gcf organize`, `gcf index`) **that folder's path**: for them a song file means the default (`all`) folder
+  (`gcf analyze` and `gcf chop` print a hint naming the split folders). `gcf run` takes the folder too, or the
+  song file with the same `--split`. A rerun of a folder keeps its split; a `--split` that differs from what the folder holds
+  exits 2. The split is recorded in `source.json`, `stems/.done.json` and `index.json` (`separation`).
+- The key is read from the drum-free stems when they cover vocals, bass and other (`all`, `drums,rest`),
+  otherwise from the full mix (`vocals`, `none`, ...). The `words` and `notes` extras need vocals / other as
+  stems of their own and are skipped with a reason otherwise.
+
 ## Enrich: the curated view (agents, read this)
 
 ```bash

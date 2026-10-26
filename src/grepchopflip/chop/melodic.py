@@ -93,12 +93,36 @@ def harmony_changes(beat_chroma: np.ndarray, active: np.ndarray, thresh: float =
 
 
 def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False) -> dict:
-    job = runner.load_job(out_dir, "other", ["loops", "phrases"], folder="melodic")
+    """`stems/other.wav` -> chops/melodic/{loops,phrases} (unchanged by slice 13: same ids, paths, fingerprint)."""
+    return chop_loops_phrases(out_dir, "other", folder="melodic", loop_prefix="melloop", phrase_prefix="phrase",
+                              stage="chop.melodic", sensitivity=sensitivity, force=force)
+
+
+def group_tag(group: str) -> str:
+    """Id prefix of a combined group's chops: the name without `+` (`inst`, `vocalsbassother`)."""
+    return group.replace("+", "")
+
+
+def chop_group(out_dir: Path, group: str, *, sensitivity: float = 0.5, force: bool = False) -> dict:
+    """Slice 13: loops and phrases (the melodic algorithm) for a combined group or `mix` (`stems/<group>.wav`
+    -> chops/<group>/{loops,phrases}, ids `<tag>loop_<n>bar_NNN` / `<tag>phrase_NNNN`). No one-shots (D-054)."""
+    tag = group_tag(group)
+    return chop_loops_phrases(out_dir, group, folder=group, loop_prefix=f"{tag}loop", phrase_prefix=f"{tag}phrase",
+                              stage=f"chop.group.{group}", sensitivity=sensitivity, force=force,
+                              extra_params={"group": group})
+
+
+def chop_loops_phrases(out_dir: Path, stem: str, *, folder: str, loop_prefix: str, phrase_prefix: str, stage: str,
+                       sensitivity: float = 0.5, force: bool = False, extra_params: dict | None = None) -> dict:
+    """1/2/4-bar loops cut on the (hit-corrected when chops/grid.json exists) downbeats, and phrases found by
+    sound (onset gaps and harmony changes, snapped to the grid) from `stems/<stem>.wav`."""
+    job = runner.load_job(out_dir, stem, ["loops", "phrases"], folder=folder)
     params = {"algo": ALGO, "sensitivity": sensitivity, "onset_delta": ONSET_DELTA,
               "min_interval_ms": MIN_INTERVAL_MS, "chroma_split": CHROMA_SPLIT,
               "chroma_window_beats": CHROMA_WINDOW, "max_bars": MAX_BARS, "loops_bars": [1, 2, 4],
               "min_phrase_beats": job.beats_per_bar, "min_phrase_bars": 1, "bar_line_pull_beats": 1.0,
-              "gap_beats": GAP_BEATS, "silence_floor_dbfs": SILENCE_FLOOR_DB, "phrase_source": "sound"}
+              "gap_beats": GAP_BEATS, "silence_floor_dbfs": SILENCE_FLOOR_DB, "phrase_source": "sound",
+              **(extra_params or {})}
     fp = runner.fingerprint(job, params)
     hit = runner.cached_summary(job, fp, force)
     if hit:
@@ -118,7 +142,7 @@ def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False
     # --- loops
     if not job.tempo_reliable:
         notes.append("tempo unreliable: loops skipped and phrase starts not snapped to the beat grid")
-    loops, dropped = runner.make_loops(job, y, sr, (1, 2, 4), "melloop", "loops")
+    loops, dropped = runner.make_loops(job, y, sr, (1, 2, 4), loop_prefix, "loops")
     params["loops_dropped"] = dropped
 
     # --- phrases
@@ -218,12 +242,12 @@ def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False
         kd = estimate_key_from_chroma(chroma[:, f0:f1].mean(axis=1))
         seg = peak_normalize(apply_fades(seg_raw, sr), -1.0)
         n_made += 1
-        name = f"phrase_{n_made:04d}"
-        rel = f"chops/melodic/phrases/{name}.wav"
+        name = f"{phrase_prefix}_{n_made:04d}"
+        rel = f"chops/{folder}/phrases/{name}.wav"
         write_chop(job.out_dir / rel, seg, sr)
         reliable = bool(kd["key_reliable"])
         c = Chop(
-            id=name, stem="other", part=None, kind="phrase", source_start_s=round(a / sr, 6),
+            id=name, stem=stem, part=None, kind="phrase", source_start_s=round(a / sr, 6),
             source_end_s=round(b / sr, 6), path=rel, channels=seg.shape[1], sample_rate=sr,
             start_beat=runner.beat_position(job.beats_s, a / sr),
             length_beats=round((b - a) / sr / B, 3), peak_dbfs=peak_dbfs(seg), rms_dbfs=rms_dbfs(seg),
@@ -238,5 +262,5 @@ def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False
     params["notes"] = notes
     params["n_onsets"] = len(onsets)
     params["dropped"] = {"phrases_shorter_than_a_bar": short_dropped}
-    log.info("melodic: %d loops, %d phrases", len(loops), n_made)
-    return runner.finish(job, chops, params, fp, "chop.melodic")
+    log.info("%s: %d loops, %d phrases", folder, len(loops), n_made)
+    return runner.finish(job, chops, params, fp, stage)

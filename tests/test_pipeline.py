@@ -583,3 +583,226 @@ def test_real_organize_through_the_pipeline(tmp_path, monkeypatch):
 
     res2 = pipeline.run_stages(ctx, stages)
     assert res2.stages["organize"]["status"] == "cached"
+
+
+# ---------------------------------------------------------------- slice 13: --split
+
+
+def _record(folder, spec):
+    from grepchopflip.split import parse_split
+
+    s = parse_split(spec)
+    (folder / "stems").mkdir(parents=True, exist_ok=True)
+    (folder / "stems" / ".done.json").write_text(json.dumps({"params": {}, **s.record()}))
+
+
+def test_resolve_input_puts_the_split_in_the_folder_name(song, tmp_path):
+    a, _ = pipeline.resolve_input(song, tmp_path / "lib")
+    b, _ = pipeline.resolve_input(song, tmp_path / "lib", split="vocals,drums+bass+other")
+    assert b.name == a.name + "-split-v-dbo"
+    assert pipeline.resolve_input(song, tmp_path / "lib", out=tmp_path / "o", split="none")[0] == (tmp_path / "o").resolve()
+
+
+def test_split_flag_reaches_the_stages_and_the_summary(song, tmp_path, capsys):
+    seen = {}
+
+    def separate(ctx):
+        seen["split"] = ctx.split
+        return {"cached": False}
+
+    code = pipeline.run_from_cli(_cli_args(song, tmp_path, split="Vocals"), pipefix.fake_stages(separate=separate))
+    doc = json.loads(capsys.readouterr().out)
+    assert code == 0 and seen["split"] == "vocals,drums+bass+other"
+    assert doc["split"] == "vocals,drums+bass+other" and doc["groups"] == ["vocals", "inst"]
+    assert doc["out_dir"].endswith("-split-v-dbo") and doc["config"]["sources"]["split"] == "flag"
+
+
+def test_rerun_adopts_the_folder_split_and_a_conflicting_flag_exits_2(song, tmp_path, capsys, monkeypatch):
+    folder, _ = pipeline.resolve_input(song, tmp_path / "lib", split="none")
+    folder.mkdir(parents=True)
+    (folder / "source.json").write_text(json.dumps({"path": str(song)}))
+    _record(folder, "none")
+    seen = {}
+
+    def separate(ctx):
+        seen["split"] = ctx.split
+        return {"cached": True}
+
+    code = pipeline.run_from_cli(_cli_args(folder, tmp_path), pipefix.fake_stages(separate=separate))
+    doc = json.loads(capsys.readouterr().out)
+    assert code == 0 and seen["split"] == "none" and doc["split"] == "none"
+    assert doc["config"]["sources"]["split"] == "recorded"
+
+    code = pipeline.run_from_cli(_cli_args(folder, tmp_path, split="drums"), pipefix.fake_stages())
+    doc = json.loads(capsys.readouterr().out)
+    assert code == exitcodes.USAGE and doc["errors"][0]["stage"] == "config"
+    assert "holds split 'none'" in doc["errors"][0]["error"]
+
+    monkeypatch.setenv("GCF_SPLIT", "vocals")
+    assert pipeline.run_from_cli(_cli_args(folder, tmp_path), pipefix.fake_stages()) == exitcodes.USAGE
+    assert "$GCF_SPLIT" in json.loads(capsys.readouterr().out)["errors"][0]["error"]
+    monkeypatch.setenv("GCF_SPLIT", "vocals,,bass")
+    assert pipeline.run_from_cli(_cli_args(song, tmp_path), pipefix.fake_stages()) == exitcodes.USAGE
+    monkeypatch.delenv("GCF_SPLIT")
+
+    # -o pointing at a folder of another split: refused the same way
+    assert pipeline.run_from_cli(_cli_args(song, tmp_path, out=folder, split="all"),
+                                 pipefix.fake_stages()) == exitcodes.USAGE
+    capsys.readouterr()
+    # a config file's split does not override what the folder holds (warning only)
+    (tmp_path / "gcf.toml").write_text('split = "vocals"\n')
+    assert pipeline.run_from_cli(_cli_args(folder, tmp_path), pipefix.fake_stages()) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["split"] == "none" and any("ignored" in w and "holds split none" in w for w in doc["warnings"])
+
+
+def test_dry_run_shows_the_split(song, tmp_path, monkeypatch, capsys):
+    from grepchopflip import summary as sm
+
+    monkeypatch.setattr(pipeline, "count_onsets", lambda p: 10)
+    monkeypatch.setattr(pipeline, "enrich_available", lambda: False)
+    assert pipeline.run_from_cli(_cli_args(song, tmp_path, split="vocals", dry_run=True, json=False)) == 0
+    out = capsys.readouterr().out
+    assert "split: vocals,drums+bass+other (groups: vocals, inst)" in out
+    assert "pass 1 + sum (inst) + pass 2 for the grid (hidden parts)" in out
+    assert "inst: loops + phrases" in out and out.splitlines()[1].endswith("-split-v-dbo")
+    folder, audio = pipeline.resolve_input(song, tmp_path / "lib", split="none")
+    p = pipeline.plan(pipeline.RunContext(input_path=song, out_dir=folder, audio=audio, split="none"))
+    assert p["split"]["groups"] == ["mix"] and "copy source" in p["split"]["separate"]
+    assert "copy source" in sm.plan_to_plain(p)
+    assert not folder.exists()
+
+
+def _split_song(tmp_path, spec="vocals"):
+    """A folder of `spec` with real (synthetic) stems: drum parts hidden in stems/.grid, combined groups, an
+    analysis whose downbeats lag the hits by 10 ms."""
+    from chopfix import tone
+    from test_drums import LAG, SR, part_signal
+
+    from grepchopflip.split import parse_split
+
+    s = parse_split(spec)
+    f = tmp_path / "song"
+    (f / "stems" / ".grid").mkdir(parents=True)
+    (f / "source.json").write_text(json.dumps({"path": "/gone.wav", "name": "x.wav", "sha256": "ab" * 32,
+                                               "duration_s": 10.0, "sample_rate": SR, "channels": 2, **s.record()}))
+    _record(f, spec)
+    kick, snare = part_signal(seed=1), part_signal(seed=2)
+    sf.write(str(f / "stems" / ".grid" / "kick.wav"), kick, SR, subtype="PCM_24")
+    sf.write(str(f / "stems" / ".grid" / "snare.wav"), snare, SR, subtype="PCM_24")
+    pad = np.zeros((10 * SR, 2), np.float32)
+    t = 0.5
+    while t < 9.5:
+        a = int(t * SR)
+        seg = tone([220.0, 277.0], 0.45)
+        pad[a:a + len(seg)] += np.stack([seg, seg], 1)[: len(pad) - a]
+        t += 0.5
+    for name in s.names:
+        y = pad * 0.3 + (kick + snare) * 0.4 if "drums" in s.members(name) else pad * 0.5
+        sf.write(str(f / "stems" / f"{name}.wav"), y.astype(np.float32), SR, subtype="PCM_24")
+    (f / "analysis.json").write_text(json.dumps({
+        "bpm": 120.0, "tempo_reliable": True, "beats_per_bar": 4, "grid_source": "tracked", "grid_consistency": 1.0,
+        "beats_s": [round(0.5 + 0.5 * i + LAG, 5) for i in range(18)],
+        "downbeats_s": [round(0.5 + 2.0 * i + LAG, 5) for i in range(5)], "key": "A", "mode": "minor"}))
+    return f
+
+
+def test_real_chop_and_organize_of_a_vocals_out_folder(tmp_path, monkeypatch):
+    from grepchopflip.index_schema import validate_index_file
+
+    f = _split_song(tmp_path, "vocals")
+    ctx = pipeline.RunContext(input_path=f, out_dir=f, audio=None, split="vocals,drums+bass+other",
+                              extras=["notes", "words"])
+    r = pipeline.stage_chop(ctx)
+    assert list(r["stems"]) == ["grid", "vocals", "inst", "extra:notes", "extra:words"]
+    assert r["stems"]["extra:notes"]["skipped"] and not r.get("errors"), r
+    assert any("other is not isolated" in w for w in ctx.warnings)
+    grid = json.loads((f / "chops" / "grid.json").read_text())
+    assert any(abs(o) > 1 for o in grid["offsets_ms"])                     # downbeats moved onto the hits
+    inst = json.loads((f / "chops" / "inst" / "chops.json").read_text())
+    loops = [c for c in inst["chops"] if c["kind"] == "loop"]
+    assert loops and all(c["extra"]["grid"] == "corrected" for c in loops)
+    starts = {round(c["extra"]["grid_start_s"], 6) for c in loops}
+    assert starts <= set(grid["downbeats_s_corrected"])                   # cut on the hit-corrected grid
+    assert not (f / "chops" / "drums").exists()
+    assert pipeline._chops_look_done(f) and pipeline._marker_exists(f, "chop")
+    assert pipeline.stage_chop(ctx)["cached"] is True
+
+    o = pipeline.stage_organize(pipeline.RunContext(input_path=f, out_dir=f, audio=None))
+    assert o["samples"] > 0 and not o.get("errors")
+    doc = json.loads((f / "index.json").read_text())
+    assert {x["class"] for x in doc["samples"]} <= {"InstLoop", "Inst", "Vox"} and "InstLoop" in {
+        x["class"] for x in doc["samples"]}
+    assert validate_index_file(f)["valid"] is True
+
+
+def test_dry_run_checks_the_grid_only_record(tmp_path):
+    f = _split_song(tmp_path, "vocals")
+    ctx = pipeline.RunContext(input_path=f, out_dir=f, audio=None, split="vocals,drums+bass+other")
+    pipeline.stage_chop(ctx)
+    assert pipeline._chops_look_done(f)
+    (f / "chops" / ".grid" / ".done.json").unlink()
+    assert not pipeline._chops_look_done(f)                               # grid step not done -> chop runs
+
+
+def test_chop_steps_put_the_grid_step_first(tmp_path):
+    from grepchopflip.chop.registry import chop_steps
+
+    f = _split_song(tmp_path, "vocals")
+    assert chop_steps("vocals", f) == ["grid", "vocals", "inst"]
+    assert chop_steps("vocals", f, ["inst", "vocals"]) == ["grid", "vocals", "inst"]
+    assert chop_steps("vocals", f, ["inst"]) == ["grid", "inst"]
+    assert chop_steps("all", f) == ["vocals"] or chop_steps("all", f) == []        # no drums.wav there
+    assert chop_steps("vocals", tmp_path / "empty") == []                          # nothing to chop: no grid step
+    assert chop_steps("drums,rest", f, ["drums", "vocals+bass+other"]) == ["drums", "vocals+bass+other"]
+
+
+def test_song_file_hints_at_split_folders(tmp_path, song, capsys):
+    from typer.testing import CliRunner
+
+    from grepchopflip import analyze as an
+    from grepchopflip.cli import app
+
+    lib = tmp_path / "lib"
+    split_folder, _ = pipeline.resolve_input(song, lib, split="vocals")
+    split_folder.mkdir(parents=True)
+    an._resolve_inputs(song, None, lib)
+    err = capsys.readouterr().err
+    assert "hint:" in err and split_folder.name in err and "pass the folder path" in err
+    res = CliRunner().invoke(app, ["chop", str(song)], env={"GCF_LIBRARY": str(lib)})
+    msg = res.stderr.replace("\n", "")                                    # rich wraps long lines
+    assert res.exit_code == 3 and split_folder.name in msg and "song folder" in msg
+
+
+def test_cli_chop_stems_take_the_folder_groups(tmp_path):
+    from typer.testing import CliRunner
+
+    from grepchopflip.cli import app
+
+    f = _split_song(tmp_path, "vocals")
+    bad = CliRunner().invoke(app, ["chop", str(f), "--stems", "drums", "--json"])
+    assert bad.exit_code == 2 and "vocals, inst" in bad.stderr
+    ok = CliRunner().invoke(app, ["chop", str(f), "--stems", "inst", "--json", "--extras", "words"])
+    assert ok.exit_code == 0, ok.stderr
+    doc = json.loads(ok.stdout)
+    assert list(doc["stems"]) == ["grid", "inst", "extra:words"]          # words: vocals isolated, extra missing
+    assert (f / "chops" / "grid.json").is_file() and not (f / "chops" / "vocals").exists()
+
+
+def test_analyze_key_source_follows_the_split(tmp_path):
+    from grepchopflip import analyze as an
+    from grepchopflip.split import parse_split
+
+    def stems(spec):
+        s = parse_split(spec)
+        return an.key_stems({n: tmp_path / f"{n}.wav" for n in s.names}, s)
+
+    assert list(stems("all")) == ["vocals", "bass", "other"]             # as before slice 13
+    assert list(stems("drums,rest")) == ["vocals+bass+other"]
+    assert stems("vocals") == {} and stems("none") == {} and stems("vocals+drums,bass+other") == {}
+    assert list(stems("vocals,drums,bass+other")) == ["vocals", "bass+other"]
+
+    f = _split_song(tmp_path / "x", "drums,rest")
+    out, mix, st, s = an._resolve_inputs(f, None)                          # no source audio: the groups summed
+    assert s.spec == "vocals+bass+other,drums" and [p.name for p in mix] == ["vocals+bass+other.wav", "drums.wav"]
+    assert set(st) == {"vocals+bass+other", "drums"}

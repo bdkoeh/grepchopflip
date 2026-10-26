@@ -17,7 +17,8 @@ from typer._click.exceptions import UsageError  # typer vendors click (typer>=0.
 from typer.core import TyperGroup
 
 from grepchopflip import __version__
-from grepchopflip.chop.registry import CHOP_STEMS, EXTRA_NAMES as CHOP_EXTRAS  # one list, shared with `run`
+from grepchopflip.chop.registry import EXTRA_NAMES as CHOP_EXTRAS  # one list, shared with `run`
+from grepchopflip.split import HELP as SPLIT_HELP
 
 
 def _normalize_json_flag(args: list[str]) -> list[str]:
@@ -209,9 +210,12 @@ def separate(
     fast: bool = typer.Option(False, "--fast", help="Use the faster htdemucs model (lower quality)."),
     device: str = typer.Option("cuda", "--device", help="cuda or cpu."),
     force: bool = typer.Option(False, "--force", help="Ignore the cache and rerun both passes."),
+    split: Optional[str] = typer.Option(None, "--split", help=SPLIT_HELP + " Default: all, or what the -o folder "
+                                        "records."),
     as_json: bool = typer.Option(False, "--json", help="Print a JSON summary on stdout."),
 ) -> None:
-    """Split a song into vocals/drums/bass/other, then the drums into kick/snare/toms/hh/ride/crash."""
+    """Split a song into vocals/drums/bass/other (grouped by --split), then the drums into
+    kick/snare/toms/hh/ride/crash."""
     import contextlib
     import logging
 
@@ -219,10 +223,24 @@ def separate(
 
     from grepchopflip import separate as sep_mod
     from grepchopflip.errors import InputError, MissingDependencyError, SeparationError
+    from grepchopflip.split import SplitError, parse_split
+
+    def usage(msg: str) -> None:
+        err.print(f"error: {msg}", highlight=False, markup=False)
+        if as_json:
+            from grepchopflip import summary
+
+            print(summary.to_json(summary.failure(str(audio), "usage", msg, EXIT_USAGE)), flush=True)
+        raise typer.Exit(EXIT_USAGE)
 
     if device not in ("cuda", "cpu"):
         err.print(f"[red]![/] --device must be cuda or cpu, not {device!r}")
         raise typer.Exit(EXIT_USAGE)
+    if split is not None:
+        try:
+            split = parse_split(split).spec
+        except SplitError as e:
+            usage(f"--split: {e}")
 
     handler = RichHandler(console=err, show_path=False, show_time=False, markup=False)
     pkg_log = logging.getLogger("grepchopflip")
@@ -231,7 +249,10 @@ def separate(
     try:
         # Libraries sometimes print; keep stdout reserved for our result.
         with contextlib.redirect_stdout(sys.stderr):
-            result = sep_mod.separate(audio, out, fast=fast, device=device, force=force, library=library)
+            result = sep_mod.separate(audio, out, fast=fast, device=device, force=force, library=library,
+                                      split=split)
+    except SplitError as e:
+        usage(str(e))
     except InputError as e:
         err.print(f"[red]![/] {e}")
         raise typer.Exit(EXIT_INPUT)
@@ -244,12 +265,15 @@ def separate(
     finally:
         pkg_log.removeHandler(handler)
 
+    for w in result.get("warnings") or []:
+        err.print(f"warning: {w}", highlight=False, markup=False)
     if as_json:
         print(json.dumps(result, indent=2))
     else:
         s = result["seconds"]
         print("stems cached" if result["cached"] else "stems written")
         print(f"out: {result['out_dir']}")
+        print(f"split: {result['split']} (stems: {', '.join(result['stems'])})")
         print(f"stems: {Path(result['out_dir']) / 'stems'}")
         if s:
             p1, p2 = s.get("pass1", {}), s.get("pass2", {})
@@ -321,11 +345,12 @@ def analyze(
 
 
 
-def _choppers() -> dict:
-    """Stem name -> chopper(out_dir, sensitivity=..., force=...) -> summary dict (chop/registry.py)."""
+def _choppers(split=None) -> dict:
+    """Step name -> chopper(out_dir, sensitivity=..., force=...) -> summary dict (chop/registry.py), in run order
+    for the folder's split (grid step, isolated stems, combined groups)."""
     from grepchopflip.chop.registry import core_choppers
 
-    return core_choppers()
+    return core_choppers(split)
 
 
 def _extra_chopper(name: str):
@@ -338,8 +363,10 @@ def _extra_chopper(name: str):
 def chop(
     out_dir: Path = typer.Argument(..., help="Output folder of `gcf separate` + `gcf analyze`."),
     stems: Optional[str] = typer.Option(
-        None, "--stems", help="Comma-separated stems to chop: drums,bass,other,vocals (default: every stem "
-                              "whose file exists)."),
+        None, "--stems", help="Comma-separated stems to chop, from the folder's groups (drums,bass,other,vocals "
+                              "for a full split; e.g. vocals,inst for --split vocals). Default: every stem whose "
+                              "file exists. --split (separate/run) decides what exists; --stems picks among what "
+                              "exists."),
     sensitivity: float = typer.Option(0.5, "--sensitivity", help="Onset sensitivity 0..1 (higher = more slices)."),
     force: bool = typer.Option(False, "--force", help="Ignore earlier results and rebuild."),
     as_json: bool = typer.Option(False, "--json", help="Print a JSON summary on stdout."),
@@ -353,19 +380,33 @@ def chop(
 
     from rich.logging import RichHandler
 
+    from grepchopflip.chop.registry import GRID_STEP, chop_order, chop_steps, extra_skip_reason
     from grepchopflip.errors import InputError, MissingDependencyError, SeparationError
+    from grepchopflip.paths import folder_split
 
+    if out_dir.is_file():
+        from grepchopflip.audio_io import sha256_file
+        from grepchopflip.config import library_dir
+        from grepchopflip.paths import missing_folder_hint, song_slug
+
+        default = library_dir() / song_slug(out_dir, sha256_file(out_dir))
+        hint = missing_folder_hint(default) or f"its default folder is {default}"
+        err.print(f"error: {out_dir} is a song file; `gcf chop` takes the song folder ({hint})",
+                  highlight=False, markup=False)
+        raise typer.Exit(EXIT_INPUT)
+    sp = folder_split(out_dir)
+    order = chop_order(sp)
+    groups = [n for n in order if n != GRID_STEP]
+    wanted_stems = None
     if stems:
-        wanted = [s.strip() for s in stems.split(",") if s.strip()]
-        bad = [s for s in wanted if s not in CHOP_STEMS]
-        if not wanted or bad:
-            err.print(f"error: --stems must be from {', '.join(CHOP_STEMS)}"
+        wanted_stems = [s.strip() for s in stems.split(",") if s.strip()]
+        bad = [s for s in wanted_stems if s not in groups]
+        if not wanted_stems or bad:
+            err.print(f"error: --stems must be from this folder's stems: {', '.join(groups)} (split {sp.spec})"
                       + (f" (got {', '.join(bad)})" if bad else ""), highlight=False, markup=False)
             raise typer.Exit(EXIT_USAGE)
-        explicit = True
-    else:
-        wanted = [s for s in CHOP_STEMS if (out_dir / "stems" / f"{s}.wav").is_file()]
-        explicit = False
+    # the grid step first when drums are hidden: it gives every group its hit-corrected grid
+    wanted = chop_steps(sp, out_dir, wanted_stems)
     extra_names = [s.strip() for s in extras.split(",") if s.strip()] if extras else []
     if [e for e in extra_names if e not in CHOP_EXTRAS]:
         err.print(f"error: --extras takes {' and/or '.join(CHOP_EXTRAS)}", highlight=False, markup=False)
@@ -390,13 +431,10 @@ def chop(
     errors: dict[str, str] = {}
     skipped: list[str] = []
     try:
-        choppers = _choppers()
+        choppers = _choppers(sp)
         with contextlib.redirect_stdout(sys.stderr):
-            # drums first: it writes chops/grid.json (corrected downbeats) that the other loops reuse
-            for name in sorted(wanted, key=lambda n: CHOP_STEMS.index(n)):
-                if not explicit and not (out_dir / "stems" / f"{name}.wav").is_file():
-                    skipped.append(name)
-                    continue
+            # grid / drums first: they write chops/grid.json (corrected downbeats) that the other loops reuse
+            for name in wanted:
                 try:
                     results[name] = choppers[name](out_dir, sensitivity=sensitivity, force=force)
                 except InputError as e:
@@ -407,6 +445,12 @@ def chop(
                     err.print(f"error: {name}: {errors[name]}", highlight=False, markup=False)
             for name in extra_names:
                 key = f"extra:{name}"
+                why = extra_skip_reason(name, sp)
+                if why:
+                    results[key] = {"stem": name, "skipped": True, "reason": why, "cached": False, "total": 0}
+                    skipped.append(key)
+                    err.print(f"{key}: skipped ({why})", highlight=False, markup=False)
+                    continue
                 try:
                     r = _extra_chopper(name)(out_dir, sensitivity=sensitivity, force=force)
                     results[key] = r
@@ -444,6 +488,11 @@ def _print_chop_results(results: dict) -> None:
     for name, r in results.items():
         if r.get("skipped"):
             print(f"{name}: skipped ({r.get('reason', 'not available')})")
+            continue
+        if r.get("stem") == "grid":
+            what = (f"{r['moved']}/{r['downbeats']} downbeats moved to a hit" if r.get("grid_json")
+                    else f"no grid ({r.get('skipped_reason')})")
+            print(f"grid: {'cached' if r.get('cached') else 'written'}  {r.get('grid_json') or '-'}  ({what})")
             continue
         where = r.get("chops_json") or r.get("paths", {}).get("chops_dir", "")
         print(f"{name}: {'cached' if r.get('cached') else 'written'}  {where}")
@@ -743,6 +792,8 @@ def run(
     tag: Optional[bool] = typer.Option(None, "--tag/--no-tag", help="Enrich: instrument tagging (extra `tag`)."),
     embed: Optional[bool] = typer.Option(None, "--embed/--no-embed", help="Enrich: CLAP embeddings (extra `embed`)."),
     bit_depth: Optional[int] = typer.Option(None, "--bit-depth", help="Organized files: 24 (default) or 16."),
+    split: Optional[str] = typer.Option(None, "--split", help=SPLIT_HELP + " Also $GCF_SPLIT or `split` in a "
+                                        "config file (not a song folder's gcf.toml). A song folder keeps its split."),
     force: bool = typer.Option(False, "--force", help="Redo every stage even if finished."),
     as_json: bool = typer.Option(False, "--json", help="JSON summary on stdout (--json=full adds the whole index)."),
     json_full: bool = typer.Option(False, "--json-full", hidden=True),
@@ -763,7 +814,7 @@ def run(
     g = ctx.obj or {}
     a = {
         "song": song, "out": out, "library": library, "fast": fast, "device": device, "sensitivity": sensitivity,
-        "extras": extras, "tag": tag, "embed": embed, "bit_depth": bit_depth, "force": force,
+        "extras": extras, "tag": tag, "embed": embed, "bit_depth": bit_depth, "split": split, "force": force,
         "json": as_json or g.get("json"), "json_full": json_full or g.get("json_full"),
         "plain": plain or g.get("plain"), "quiet": quiet or g.get("quiet"),
         "verbose": verbose + int(g.get("verbose") or 0),
