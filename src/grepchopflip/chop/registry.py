@@ -61,6 +61,21 @@ def chop_order(split: str | Split | None) -> list[str]:
     return steps
 
 
+def chop_steps(split: str | Split | None, folder, wanted: list[str] | None = None) -> list[str]:
+    """The steps `gcf chop` / `gcf run` execute, in order: `wanted` stems (default: every stem of the split whose
+    file exists under `folder/stems`) sorted by chop_order, preceded by the grid step when drums are not isolated
+    and anything is chopped. [] when there is nothing to chop."""
+    from pathlib import Path
+
+    order = chop_order(split)
+    if wanted is None:
+        wanted = [s for s in order if s != GRID_STEP and (Path(folder) / "stems" / f"{s}.wav").is_file()]
+    steps = sorted({s for s in wanted if s != GRID_STEP}, key=order.index)
+    if steps and GRID_STEP in order:
+        steps = [GRID_STEP, *steps]
+    return steps
+
+
 def what_it_gets(name: str) -> str:
     return {"drums": "one-shots per part + loops", "bass": "notes + loops", "other": "loops + phrases",
             "vocals": "phrases", GRID_STEP: "chops/grid.json only"}.get(name, "loops + phrases")

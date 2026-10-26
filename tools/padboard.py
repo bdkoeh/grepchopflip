@@ -438,7 +438,6 @@ def build(folder: Path) -> Path:
 
 
 KIND_FOLDERS = ("oneshots", "loops", "phrases", "words", "review", "stems")      # organized tree (slice 6)
-LEGACY_FOLDERS = ("drums", "bass", "melodic", "vocals", "words", "stems", "chops")   # chops/<stem>/ before organize
 
 
 def _board_dir(root: Path, w: Path) -> Path | None:
@@ -447,12 +446,8 @@ def _board_dir(root: Path, w: Path) -> Path | None:
         return None
     for i, p in enumerate(parts):
         if p == "chops":                       # not organized yet: one board per folder directly under chops/
-            if i + 1 < len(parts):             # (chops/drums, chops/melodic, chops/inst, chops/vocals+bass, ...)
-                return root.joinpath(*parts[: i + 2])
-            d = w.parent
-            while d != root and d.name not in LEGACY_FOLDERS:
-                d = d.parent
-            return d if d != root else None
+            # (chops/drums, chops/melodic, chops/inst, chops/vocals+bass, ...); a WAV loose in chops/ gets none
+            return root.joinpath(*parts[: i + 2]) if i + 1 < len(parts) else None
         if p in KIND_FOLDERS:                  # organized: one board per kind folder (oneshots/, review/, ...)
             return root.joinpath(*parts[: i + 1])
     return None

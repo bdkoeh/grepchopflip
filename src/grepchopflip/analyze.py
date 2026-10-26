@@ -18,7 +18,7 @@ from grepchopflip.beats import AudioReadError, analyze_beats, load_mono
 from grepchopflip.config import library_dir
 from grepchopflip.key import NOTES, estimate_key, null_key, parse_key, relative_key
 from grepchopflip.models import BEAT_THIS_SHA256
-from grepchopflip.paths import folder_split, song_slug
+from grepchopflip.paths import folder_split, missing_folder_hint, song_slug
 
 ANALYSIS_FILE = "analysis.json"
 DONE_FILE = "analysis_done.json"  # distinct from slice 2's stems/.done.json
@@ -118,6 +118,10 @@ def _resolve_inputs(audio_or_out: Path | str, out_dir: Path | str | None, librar
     # Same folder rule as `gcf separate` (paths.song_slug), so analyze finds the stems it produced. A song file
     # without -o means the default split's folder; for other splits pass the folder (or -o).
     out = Path(out_dir) if out_dir else library_dir(library) / song_slug(p, sha256_path(p))
+    if not out_dir:
+        hint = missing_folder_hint(out)
+        if hint:
+            _log(f"hint: {hint}")
     sp = folder_split(out)
     return out, [p], _stem_paths(out, sp.names), sp
 

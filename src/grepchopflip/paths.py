@@ -47,6 +47,27 @@ def recorded_split(folder: str | Path) -> Split | None:
     return from_record(src.get("split"))
 
 
+def split_siblings(folder: str | Path) -> list[Path]:
+    """Folders of other splits of the same song next to the default-split folder (`<slug>-split-*`)."""
+    folder = Path(folder)
+    if not folder.parent.is_dir():
+        return []
+    return sorted(p for p in folder.parent.glob(f"{folder.name}-split-*") if p.is_dir())
+
+
+def missing_folder_hint(folder: str | Path) -> str | None:
+    """When the default-split folder of a song does not exist but other splits' folders do, a hint naming
+    them (a song file always means the default folder; other splits are reached by their folder path)."""
+    folder = Path(folder)
+    if folder.exists():
+        return None
+    sib = split_siblings(folder)
+    if not sib:
+        return None
+    return (f"{folder.name} does not exist, but this song has folders of other splits: "
+            f"{', '.join(str(p) for p in sib)}; pass the folder path instead of the song file")
+
+
 def folder_split(folder: str | Path) -> Split:
     """recorded_split, defaulting to `all` (folders from before slice 13, or folders made by hand)."""
     return recorded_split(folder) or ALL

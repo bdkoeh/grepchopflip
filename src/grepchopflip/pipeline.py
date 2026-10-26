@@ -225,6 +225,7 @@ def stage_separate(ctx: RunContext) -> dict:
             return {"cached": True, "note": f"{why}; existing stems kept"}
         raise InputError(f"source audio for {ctx.out_dir} not found (source.json path); cannot separate")
     r = sep.separate(ctx.audio, ctx.out_dir, fast=ctx.fast, device=ctx.device, force=ctx.force, split=ctx.split)
+    ctx.warnings.extend(f"separate: {w}" for w in r.get("warnings") or [])
     return {"cached": bool(r["cached"]), "recorded_seconds": r.get("seconds") or {}, "split": r.get("split")}
 
 
@@ -261,15 +262,12 @@ def stage_chop(ctx: RunContext) -> dict:
     """Every stem of the folder's split whose file exists (grid step / drums first: they write chops/grid.json
     the other loops reuse; combined groups last), then extras. One stem failing does not stop the others; the
     stage is `partial` then. An extra whose stem is not isolated in the split is skipped with a reason."""
-    from grepchopflip.chop.registry import GRID_STEP, chop_order, chopper, extra_skip_reason
+    from grepchopflip.chop.registry import chop_steps, chopper, extra_skip_reason
     from grepchopflip.errors import InputError
 
-    order = chop_order(ctx.split)
-    wanted = [s for s in order if s != GRID_STEP and (ctx.out_dir / "stems" / f"{s}.wav").is_file()]
+    wanted = chop_steps(ctx.split, ctx.out_dir)
     if not wanted:
         raise InputError(f"no stems under {ctx.out_dir / 'stems'} to chop")
-    if GRID_STEP in order:
-        wanted = [GRID_STEP, *wanted]
     results: dict[str, dict] = {}
     errors: dict[str, str] = {}
     exceptions: list[BaseException] = []
@@ -703,9 +701,14 @@ def _chops_look_done(folder: Path, split: str | None = None) -> bool:
     from grepchopflip.chop.registry import GRID_STEP, chop_order
     from grepchopflip.paths import folder_split
 
-    sp = split if split is not None else folder_split(folder)
+    from grepchopflip.split import parse_split
+
+    sp = parse_split(split) if split is not None else folder_split(folder)
     if not (folder / "chops" / "drums" / ".done.json").is_file() and (folder / "stems" / "drums.wav").is_file():
         return False
+    if sp.drum_parts_hidden and (folder / "stems" / ".grid").is_dir() \
+            and not (folder / "chops" / ".grid" / ".done.json").is_file():
+        return False                                  # the grid-only step has not run yet
     for stem in chop_order(sp):
         if stem == GRID_STEP or not (folder / "stems" / f"{stem}.wav").is_file():
             continue

@@ -736,6 +736,44 @@ def test_real_chop_and_organize_of_a_vocals_out_folder(tmp_path, monkeypatch):
     assert validate_index_file(f)["valid"] is True
 
 
+def test_dry_run_checks_the_grid_only_record(tmp_path):
+    f = _split_song(tmp_path, "vocals")
+    ctx = pipeline.RunContext(input_path=f, out_dir=f, audio=None, split="vocals,drums+bass+other")
+    pipeline.stage_chop(ctx)
+    assert pipeline._chops_look_done(f)
+    (f / "chops" / ".grid" / ".done.json").unlink()
+    assert not pipeline._chops_look_done(f)                               # grid step not done -> chop runs
+
+
+def test_chop_steps_put_the_grid_step_first(tmp_path):
+    from grepchopflip.chop.registry import chop_steps
+
+    f = _split_song(tmp_path, "vocals")
+    assert chop_steps("vocals", f) == ["grid", "vocals", "inst"]
+    assert chop_steps("vocals", f, ["inst", "vocals"]) == ["grid", "vocals", "inst"]
+    assert chop_steps("vocals", f, ["inst"]) == ["grid", "inst"]
+    assert chop_steps("all", f) == ["vocals"] or chop_steps("all", f) == []        # no drums.wav there
+    assert chop_steps("vocals", tmp_path / "empty") == []                          # nothing to chop: no grid step
+    assert chop_steps("drums,rest", f, ["drums", "vocals+bass+other"]) == ["drums", "vocals+bass+other"]
+
+
+def test_song_file_hints_at_split_folders(tmp_path, song, capsys):
+    from typer.testing import CliRunner
+
+    from grepchopflip import analyze as an
+    from grepchopflip.cli import app
+
+    lib = tmp_path / "lib"
+    split_folder, _ = pipeline.resolve_input(song, lib, split="vocals")
+    split_folder.mkdir(parents=True)
+    an._resolve_inputs(song, None, lib)
+    err = capsys.readouterr().err
+    assert "hint:" in err and split_folder.name in err and "pass the folder path" in err
+    res = CliRunner().invoke(app, ["chop", str(song)], env={"GCF_LIBRARY": str(lib)})
+    msg = res.stderr.replace("\n", "")                                    # rich wraps long lines
+    assert res.exit_code == 3 and split_folder.name in msg and "song folder" in msg
+
+
 def test_cli_chop_stems_take_the_folder_groups(tmp_path):
     from typer.testing import CliRunner
 

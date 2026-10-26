@@ -265,6 +265,8 @@ def separate(
     finally:
         pkg_log.removeHandler(handler)
 
+    for w in result.get("warnings") or []:
+        err.print(f"warning: {w}", highlight=False, markup=False)
     if as_json:
         print(json.dumps(result, indent=2))
     else:
@@ -378,26 +380,33 @@ def chop(
 
     from rich.logging import RichHandler
 
-    from grepchopflip.chop.registry import GRID_STEP, chop_order, extra_skip_reason
+    from grepchopflip.chop.registry import GRID_STEP, chop_order, chop_steps, extra_skip_reason
     from grepchopflip.errors import InputError, MissingDependencyError, SeparationError
     from grepchopflip.paths import folder_split
 
+    if out_dir.is_file():
+        from grepchopflip.audio_io import sha256_file
+        from grepchopflip.config import library_dir
+        from grepchopflip.paths import missing_folder_hint, song_slug
+
+        default = library_dir() / song_slug(out_dir, sha256_file(out_dir))
+        hint = missing_folder_hint(default) or f"its default folder is {default}"
+        err.print(f"error: {out_dir} is a song file; `gcf chop` takes the song folder ({hint})",
+                  highlight=False, markup=False)
+        raise typer.Exit(EXIT_INPUT)
     sp = folder_split(out_dir)
     order = chop_order(sp)
     groups = [n for n in order if n != GRID_STEP]
+    wanted_stems = None
     if stems:
-        wanted = [s.strip() for s in stems.split(",") if s.strip()]
-        bad = [s for s in wanted if s not in groups]
-        if not wanted or bad:
+        wanted_stems = [s.strip() for s in stems.split(",") if s.strip()]
+        bad = [s for s in wanted_stems if s not in groups]
+        if not wanted_stems or bad:
             err.print(f"error: --stems must be from this folder's stems: {', '.join(groups)} (split {sp.spec})"
                       + (f" (got {', '.join(bad)})" if bad else ""), highlight=False, markup=False)
             raise typer.Exit(EXIT_USAGE)
-        explicit = True
-    else:
-        wanted = [s for s in groups if (out_dir / "stems" / f"{s}.wav").is_file()]
-        explicit = False
-    if wanted and GRID_STEP in order:
-        wanted = [GRID_STEP, *wanted]        # the hidden drum parts give every group its hit-corrected grid
+    # the grid step first when drums are hidden: it gives every group its hit-corrected grid
+    wanted = chop_steps(sp, out_dir, wanted_stems)
     extra_names = [s.strip() for s in extras.split(",") if s.strip()] if extras else []
     if [e for e in extra_names if e not in CHOP_EXTRAS]:
         err.print(f"error: --extras takes {' and/or '.join(CHOP_EXTRAS)}", highlight=False, markup=False)
@@ -425,10 +434,7 @@ def chop(
         choppers = _choppers(sp)
         with contextlib.redirect_stdout(sys.stderr):
             # grid / drums first: they write chops/grid.json (corrected downbeats) that the other loops reuse
-            for name in sorted(wanted, key=lambda n: order.index(n)):
-                if name != GRID_STEP and not explicit and not (out_dir / "stems" / f"{name}.wav").is_file():
-                    skipped.append(name)
-                    continue
+            for name in wanted:
                 try:
                     results[name] = choppers[name](out_dir, sensitivity=sensitivity, force=force)
                 except InputError as e:

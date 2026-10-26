@@ -143,7 +143,11 @@ def _result(out_dir: Path, source: audio_io.SourceInfo, done: dict, cached: bool
         "stems": {k: str(v) for k, v in stems.items()},
         "drum_parts": {} if hidden else {k: str(v) for k, v in parts.items()},
         "grid_parts": {k: str(v) for k, v in parts.items()} if hidden else {},
+        # stems_format: the first group stem's format (for `none` that is the source's, e.g. 48 kHz); `formats`
+        # lists every output file (the drum parts stay at the separator's 44.1 kHz; a clipped sum is FLOAT)
         "stems_format": done.get("stems_format"),
+        "formats": done.get("formats"),
+        "warnings": split_warnings(done),
         "seconds": done.get("seconds", {}),
         "gpu": done.get("gpu"),
         "models": done.get("models", {}),
@@ -283,7 +287,9 @@ def check_split(out_dir: Path, requested: Split | None) -> Split:
 
 
 def _sum_group(paths: list[Path], dest: Path) -> dict:
-    """Float sum of separated stems, written at the stems' subtype (16-bit stems give a 16-bit group)."""
+    """Float sum of separated stems, written at the stems' subtype (16-bit stems give a 16-bit group). A sum
+    that peaks above full scale is written as 32-bit float instead, so the group stays the exact float sum
+    (no clipping, no normalisation: organize peak-normalises every sample anyway)."""
     info = sf.info(str(paths[0]))
     acc = None
     for p in paths:
@@ -294,11 +300,25 @@ def _sum_group(paths: list[Path], dest: Path) -> dict:
             n = min(len(acc), len(y))
             acc = acc[:n] + y[:n]
     peak = float(abs(acc).max()) if acc is not None and acc.size else 0.0
-    if peak > 1.0 and not info.subtype.startswith(("FLOAT", "DOUBLE")):
-        log.warning("%s peaks at %.2f dBFS; samples above full scale are clipped at %s", dest.name,
-                    20 * math.log10(peak), info.subtype)
-    sf.write(str(dest), acc, info.samplerate, subtype=info.subtype)
-    return {"members": [p.stem for p in paths], "peak": round(peak, 4)}
+    subtype = info.subtype
+    over = peak > 1.0 and not subtype.startswith(("FLOAT", "DOUBLE"))
+    if over:
+        subtype = "FLOAT"
+        log.warning("%s peaks at %+.2f dBFS (above full scale): written as 32-bit float instead of %s so nothing "
+                    "is clipped", dest.name, 20 * math.log10(peak), info.subtype)
+    sf.write(str(dest), acc, info.samplerate, subtype=subtype)
+    return {"members": [p.stem for p in paths], "peak": round(peak, 4), "subtype": subtype,
+            "stems_subtype": info.subtype, "over_full_scale": over}
+
+
+def split_warnings(done: dict) -> list[str]:
+    """Run-level warnings recorded with a separation (a group written as float because its sum clipped)."""
+    out = []
+    for name, c in sorted((done.get("composed") or {}).items()):
+        if isinstance(c, dict) and c.get("over_full_scale"):
+            out.append(f"group {name} peaks at {20 * math.log10(max(c['peak'], 1e-12)):+.2f} dBFS, above full scale: "
+                       f"stems/{name}.wav is 32-bit float instead of {c.get('stems_subtype')} (not clipped)")
+    return out
 
 
 def _write_mix(wav: Path, source: Path, dest: Path) -> None:
@@ -406,6 +426,11 @@ def _separate(path: Path, out_dir, fast: bool, device: str, force: bool, library
                 log.info("%s: load %.1fs, separate %.1fs", k, v["model_load_s"], v["separate_s"])
         fmt = sf.info(str(next(iter(stems.values()))))
         stems_format = {"sample_rate": fmt.samplerate, "channels": fmt.channels, "subtype": fmt.subtype}
+        formats = {}
+        for p in outputs:
+            i = sf.info(str(p))
+            formats[p.relative_to(stems_dir).as_posix()] = {"sample_rate": i.samplerate, "channels": i.channels,
+                                                           "subtype": i.subtype}
         models = {
             "htdemucs" if fast else "htdemucs_ft": "MIT",
             "MDX23C-DrumSep": "undocumented",
@@ -413,7 +438,7 @@ def _separate(path: Path, out_dir, fast: bool, device: str, force: bool, library
         done = cache.mark_done(
             stems_dir, source.sha256, params, _versions(),
             extra={"seconds": seconds, "gpu": gpu, "device": device, "models": models,
-                   "stems_format": stems_format, **sp.record(), "method": sp.method,
+                   "stems_format": stems_format, "formats": formats, **sp.record(), "method": sp.method,
                    "drum_parts": "hidden" if sp.drum_parts_hidden else "stems/drums",
                    **({"composed": composed} if composed else {})},
         )

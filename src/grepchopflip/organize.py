@@ -92,7 +92,6 @@ CLASS_FOLDER = {
     "DrumLoop": "loops/drums", "BassLoop": "loops/bass", "MelLoop": "loops/melodic",
     "Mel": "phrases/melodic", "Vox": "phrases/vocals", "Word": "words/vocals",
 }
-LOOP_CLASSES = ("DrumLoop", "BassLoop", "MelLoop")     # the default split's; every class ending in Loop is a loop
 ROOT_MIN_CONFIDENCE = 0.5
 
 

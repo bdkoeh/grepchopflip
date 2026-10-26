@@ -57,7 +57,9 @@ class FakeSep:
             if name in self.omit:
                 continue
             y = np.zeros((4410, 2), np.float32)
-            if self.noise:
+            if name in getattr(self, "const", {}):
+                y = np.full((4410, 2), self.const[name], np.float32)
+            elif self.noise:
                 y = (np.random.default_rng(sum(map(ord, name))).standard_normal((4410, 2)) * 0.1).astype(np.float32)
             sf.write(str(Path(self.output_dir) / f"{name}.wav"), y, 44100, subtype=self.subtype)
         return []
@@ -348,6 +350,52 @@ def test_cli_split_flag_and_errors_exit_2(fake, wav, tmp_path):
     assert clash.exit_code == 2 and "holds split" in json.loads(clash.stdout)["errors"][0]["error"]
     plain = CliRunner().invoke(cli.app, ["separate", str(wav), "-o", str(out), "--split", "none"])
     assert plain.exit_code == 2 and plain.stdout == ""
+
+
+def test_a_sum_above_full_scale_is_written_as_float_not_clipped(fake, wav, tmp_path, capsys):
+    """Review fix: two 0.7 stems at 16-bit sum to 1.4; the group is written as 32-bit float (exact sum), the
+    choice and the peak are recorded, and the run warns."""
+    fake.subtype, fake.const = "PCM_16", {"bass": 0.7, "other": 0.7, "vocals": 0.1, "drums": 0.1}
+    out = tmp_path / "o"
+    r = sep.separate(wav, out, device="cpu", split="bass+other")          # = vocals+drums,bass+other
+    bo = out / "stems" / "bass+other.wav"
+    assert sf.info(str(bo)).subtype == "FLOAT"
+    assert sf.info(str(out / "stems" / "vocals+drums.wav")).subtype == "PCM_16"   # below full scale: stems' format
+    y, _ = sf.read(str(bo), dtype="float64")
+    q = sf.read(str(tmp_path / "o" / "stems" / "vocals+drums.wav"), dtype="float64")[0]   # sanity: 0.1 + 0.1
+    assert np.allclose(q, 0.2, atol=1e-3)
+    assert np.allclose(y, 1.4, atol=1e-3) and y.max() > 1.0                # the exact sum, nothing clipped
+    done = json.loads((out / "stems" / ".done.json").read_text())
+    c = done["composed"]["bass+other"]
+    assert c["subtype"] == "FLOAT" and c["stems_subtype"] == "PCM_16" and c["over_full_scale"] is True
+    assert c["peak"] == pytest.approx(1.4, abs=1e-3)
+    assert done["composed"]["vocals+drums"]["over_full_scale"] is False
+    assert done["formats"]["bass+other.wav"]["subtype"] == "FLOAT"
+    assert len(r["warnings"]) == 1 and "bass+other" in r["warnings"][0] and "32-bit float" in r["warnings"][0]
+    assert sep.separate(wav, out, device="cpu")["warnings"] == r["warnings"]        # cached runs still say so
+    res = CliRunner().invoke(cli.app, ["separate", str(wav), "-o", str(out), "--json"])
+    assert res.exit_code == 0 and "warning: group bass+other" in res.stderr
+    assert json.loads(res.stdout)["warnings"] == r["warnings"]
+
+
+def test_stage_separate_carries_the_warning_into_the_run(fake, wav, tmp_path):
+    from grepchopflip import pipeline
+
+    fake.subtype, fake.const = "PCM_16", {"bass": 0.7, "other": 0.7}
+    ctx = pipeline.RunContext(input_path=wav, out_dir=tmp_path / "o", audio=wav, device="cpu", split="bass+other")
+    pipeline.stage_separate(ctx)
+    assert any(w.startswith("separate: group bass+other peaks at") for w in ctx.warnings)
+
+
+def test_none_records_every_file_format(fake, tmp_path):
+    src = tmp_path / "in.wav"
+    sf.write(str(src), np.zeros((48000, 2), np.float32), 48000, subtype="PCM_24")
+    sep.separate(src, tmp_path / "o", device="cpu", split="none")
+    done = json.loads((tmp_path / "o" / "stems" / ".done.json").read_text())
+    assert done["stems_format"]["sample_rate"] == 48000                    # mix.wav: the source's own format
+    assert done["formats"]["mix.wav"] == {"sample_rate": 48000, "channels": 2, "subtype": "PCM_24"}
+    assert done["formats"][".grid/kick.wav"]["sample_rate"] == 44100       # the separator's parts
+    assert set(done["formats"]) == {"mix.wav", *(f".grid/{p}.wav" for p in sep.DRUM_PARTS)}
 
 
 # ---------- GPU end to end ----------

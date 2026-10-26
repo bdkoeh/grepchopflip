@@ -41,7 +41,10 @@ all four, otherwise the members joined with `+` (`vocals+bass+other`).
   (they miss a residual about 21-27 dB below the mix), so `none` uses the original file (`stems/mix.wav`), and
   `index.json` `separation.method` says `sum` or `source`.
 - One split per song folder: other splits get their own folder (`<name>-<hash8>-split-v-dbo`,
-  `-split-none`). A rerun of a folder keeps its split; a `--split` that differs from what the folder holds
+  `-split-none`). After `gcf separate song.wav --split X`, give later commands (`gcf analyze`, `gcf chop`,
+  `gcf organize`, `gcf index`) **that folder's path**: for them a song file means the default (`all`) folder
+  (`gcf analyze` and `gcf chop` print a hint naming the split folders). `gcf run` takes the folder too, or the
+  song file with the same `--split`. A rerun of a folder keeps its split; a `--split` that differs from what the folder holds
   exits 2. The split is recorded in `source.json`, `stems/.done.json` and `index.json` (`separation`).
 - The key is read from the drum-free stems when they cover vocals, bass and other (`all`, `drums,rest`),
   otherwise from the full mix (`vocals`, `none`, ...). The `words` and `notes` extras need vocals / other as
