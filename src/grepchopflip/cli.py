@@ -108,7 +108,7 @@ EXIT_USAGE = 2
 EXIT_INPUT = 3
 EXIT_MISSING_DEP = 4
 EXIT_GPU = 5
-EXIT_MODEL = 5  # model download failure (same number as GPU problems, per slice 3 spec)
+EXIT_MODEL = 5  # model download failure (same number as GPU problems, shared with analysis failures)
 EXIT_NOTHING = 6
 EXIT_PARTIAL = 10
 

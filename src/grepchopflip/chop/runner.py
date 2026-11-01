@@ -1,4 +1,4 @@
-"""Scaffolding shared by the slice-5 choppers (bass, melodic, vocals): inputs, rerun rule, summaries.
+"""Scaffolding shared by the stem choppers (bass, melodic, vocals): inputs, rerun rule, summaries.
 
 Rerun rule: chops.json records a fingerprint of the stem bytes, the beat grid used (including the corrected
 `chops/grid.json` when present) and the parameters. If it matches and every listed file exists the stage is
@@ -179,7 +179,7 @@ def finish(job: Job, chops: list[Chop], params: dict, fp: str, stage: str,
 
 
 def stamp(job: Job, chop: Chop, a: int, b: int) -> Chop:
-    """Fill the provenance fields slice 6 needs: source file/hash, bit depth, bar index, sample range."""
+    """Fill the provenance fields organization needs: source file/hash, bit depth, bar index, sample range."""
     chop.source_file = job.source_file
     chop.source_sha256 = job.stem_sha256
     chop.bit_depth = BIT_DEPTH

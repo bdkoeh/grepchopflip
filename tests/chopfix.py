@@ -1,4 +1,4 @@
-"""Synthetic stems and output folders for the slice-5 chopper tests (CPU only, a few seconds of audio)."""
+"""Synthetic stems and output folders for the stem chopper tests (CPU only, a few seconds of audio)."""
 
 from __future__ import annotations
 

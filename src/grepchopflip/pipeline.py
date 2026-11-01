@@ -13,7 +13,7 @@ Stage statuses: done (ran), cached (already finished), skipped (not applicable, 
 partial (some of its work failed, e.g. one stem), failed, blocked (a stage it needs did not finish).
 
 Enrich is optional: it runs when the installed package has `grepchopflip.enrich` with an `enrich(song_dir, ...)`
-function (slice 7). Keyword arguments it does not accept are not passed. Missing extras (MissingDependencyError
+function. Keyword arguments it does not accept are not passed. Missing extras (MissingDependencyError
 or ModuleNotFoundError) mark it skipped with the reason, not failed.
 """
 
@@ -62,9 +62,9 @@ class RunContext:
     bit_depth: int = 24
     force: bool = False
     duration_s: float | None = None
-    settings: list[dict] = field(default_factory=list)   # reserved [settings] tables (slice 11), untouched
+    settings: list[dict] = field(default_factory=list)   # reserved [settings] tables, untouched
     warnings: list[str] = field(default_factory=list)
-    split: str = "all"                 # canonical --split (slice 13); one per song folder
+    split: str = "all"                 # canonical --split; one per song folder
 
 
 class StageSkipped(Exception):
@@ -84,7 +84,7 @@ StageFn = Callable[[RunContext], dict]
 def resolve_input(path: Path, library: Path | str | None = None, out: Path | None = None,
                   split: str | None = None) -> tuple[Path, Path | None]:
     """(song folder, source audio or None) for a song file or an existing song folder. Raises InputError.
-    A song file's folder carries the split (`<name>-<hash8>-split-<token>`, slice 13); a folder is taken as is."""
+    A song file's folder carries the split (`<name>-<hash8>-split-<token>`, separation depth); a folder is taken as is."""
     from grepchopflip.audio_io import sha256_file
     from grepchopflip.config import library_dir
     from grepchopflip.errors import InputError
@@ -337,7 +337,7 @@ def _missing_extra(e: BaseException) -> bool:
 
 
 def stage_enrich(ctx: RunContext) -> dict:
-    """Slice 7 contract: `grepchopflip.enrich.enrich(song_dir, *, force, tag, embed, device) -> dict` (ENRICH_CONTRACT)."""
+    """Enrichment contract: `grepchopflip.enrich.enrich(song_dir, *, force, tag, embed, device) -> dict` (ENRICH_CONTRACT)."""
     if not enrich_available():
         raise StageSkipped("enrich is not part of this gcf install")
     try:

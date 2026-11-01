@@ -17,9 +17,9 @@ SAMPLE_KEYS = {
     "sample_rate", "bit_depth", "root_midi", "root_note", "root_confidence", "key", "mode", "peak_dbfs",
     "rms_dbfs", "crest_db", "lufs_i", "lufs_measure", "fade_in_ms", "fade_out_ms", "zero_snapped", "character",
     "dedup_group", "is_dedup_representative", "tags", "source_file", "source_sha256", "sha256",
-    # schema 1.1 (slice 7): null until `gcf enrich`
+    # schema 1.1: null until `gcf enrich`
     "features", "class_confidence", "classifier_class", "dedup_size", "embedding_ref", "wav_chunks",
-    # schema 1.2 (slice 12): layering partners (null for one-shots and words)
+    # schema 1.2: layering partners (null for one-shots and words)
     "bar_span", "layers_with",
     "grid_uncertain",       # D-056, optional under 1.1
 }

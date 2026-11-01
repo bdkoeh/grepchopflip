@@ -1,4 +1,4 @@
-"""Fake pipeline stages for the slice-10 tests (no models, no audio work).
+"""Fake pipeline stages for the pipeline tests (no models, no audio work).
 
 Each fake keeps a marker under `<song>/.fake/<stage>` and reports `cached` when the marker exists (unless
 --force), the way the real stages use their own done records. `FAKE_FAIL=<stage>[,<stage>]` makes stages

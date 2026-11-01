@@ -143,7 +143,7 @@ def probe(path: Path) -> SourceInfo:
 
 
 def write_source_json(out_dir: Path, info: SourceInfo, extra: dict | None = None) -> Path:
-    """source.json: the input's facts, plus `extra` (slice 13: the canonical `split` and its `groups`)."""
+    """source.json: the input's facts, plus `extra` (separation depth: the canonical `split` and its `groups`)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     p = out_dir / "source.json"
     atomic_write(p, json.dumps({**info.to_dict(), **(extra or {})}, indent=2) + "\n")

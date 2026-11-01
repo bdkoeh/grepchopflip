@@ -1,4 +1,4 @@
-"""Slice 10: pipeline with fake stages (skip / force / partial failure), exit codes, config precedence,
+"""Pipeline with fake stages (skip / force / partial failure), exit codes, config precedence,
 progress lines, dry-run plan, and one run through the real organize stage."""
 
 import io
@@ -193,7 +193,7 @@ def test_stage_stdout_goes_to_stderr(tmp_path, capsys):
     assert cap.out == "" and "library chatter" in cap.err
 
 
-# ---------------------------------------------------------------- enrich (optional, slice 7)
+# ---------------------------------------------------------------- enrich (optional, enrichment)
 
 
 def test_enrich_skipped_when_not_installed(tmp_path, monkeypatch):
@@ -211,8 +211,8 @@ def _with_enrich(monkeypatch, fn):
     monkeypatch.setattr(pipeline, "enrich_available", lambda: True)
 
 
-def test_enrich_slice7_contract(tmp_path, monkeypatch):
-    """Exactly the signature agreed with slice 7."""
+def test_enrich_contract(tmp_path, monkeypatch):
+    """The public enrichment call signature."""
     seen = {}
 
     def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embed: bool | None = None,
@@ -378,7 +378,7 @@ def test_explicit_config_replaces_discovery_and_paths_are_file_relative(tmp_path
         cfg.resolve_run_config({}, cwd=tmp_path, explicit=tmp_path / "nope.toml", env={})
 
 
-def test_library_precedence_matches_slice6(tmp_path):
+def test_library_precedence_matches_organization(tmp_path):
     _toml(tmp_path / "gcf.toml", 'library = "/from/file"\n')
     assert cfg.resolve_run_config({}, cwd=tmp_path, env={})["library"] == Path("/from/file")
     assert cfg.resolve_run_config({}, cwd=tmp_path, env={"GCF_LIBRARY": "/from/env"})["library"] == Path("/from/env")
@@ -591,7 +591,7 @@ def test_real_organize_through_the_pipeline(tmp_path, monkeypatch):
     assert res2.stages["organize"]["status"] == "cached"
 
 
-# ---------------------------------------------------------------- slice 13: --split
+# ---------------------------------------------------------------- separation depth: --split
 
 
 def _record(folder, spec):
@@ -803,7 +803,7 @@ def test_analyze_key_source_follows_the_split(tmp_path):
         s = parse_split(spec)
         return an.key_stems({n: tmp_path / f"{n}.wav" for n in s.names}, s)
 
-    assert list(stems("all")) == ["vocals", "bass", "other"]             # as before slice 13
+    assert list(stems("all")) == ["vocals", "bass", "other"]             # as before separation-depth support
     assert list(stems("drums,rest")) == ["vocals+bass+other"]
     assert stems("vocals") == {} and stems("none") == {} and stems("vocals+drums,bass+other") == {}
     assert list(stems("vocals,drums,bass+other")) == ["vocals", "bass+other"]

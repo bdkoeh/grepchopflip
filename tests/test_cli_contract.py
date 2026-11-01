@@ -1,4 +1,4 @@
-"""Slice 10 console contract for `gcf run` (brief section 8, D-044), in a real subprocess so stdout and stderr
+"""Console contract for `gcf run` (brief section 8, D-044), in a real subprocess so stdout and stderr
 are pipes (not a terminal): stdout carries only the result, stderr the progress; exit codes; flags."""
 
 import json

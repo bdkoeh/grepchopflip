@@ -49,13 +49,13 @@ def library_dir(override: str | Path | None = None) -> Path:
     return Path.home() / "Music" / "gcf-library"
 
 
-# ----------------------------------------------------------------------------- run settings (slice 10)
+# ----------------------------------------------------------------------------- run settings
 #
 # Precedence, highest first: command-line flags, then GCF_* environment variables, then `gcf.toml` in the song
 # folder, then `gcf.toml` in the current directory, then the user config `$XDG_CONFIG_HOME/gcf/config.toml`
 # (default `~/.config/gcf/config.toml`). `--config FILE` replaces the discovered files with that one file.
 #
-# Files hold top-level keys (below). A `[settings]` table is reserved for the cutting-rule settings of slice 11
+# Files hold top-level keys (below). A `[settings]` table is reserved for the future cutting rules
 # and is passed through untouched (never validated or merged here). Other tables and unknown keys are reported
 # as warnings and ignored.
 
@@ -76,7 +76,7 @@ RUN_KEYS: dict[str, tuple[str, str]] = {
     "embed": ("bool", "GCF_EMBED"),
     "bit_depth": ("int", "GCF_BIT_DEPTH"),
     "progress": ("str", "GCF_PROGRESS"),
-    "split": ("split", "GCF_SPLIT"),       # slice 13; decides the song folder, so a song folder's gcf.toml cannot set it
+    "split": ("split", "GCF_SPLIT"),       # separation depth; decides the song folder, so a song folder's gcf.toml cannot set it
 }
 DEFAULTS: dict[str, object] = {
     "library": None, "cache_dir": None, "fast": False, "device": "cuda", "sensitivity": 0.5, "extras": [],

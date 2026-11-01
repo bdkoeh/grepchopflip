@@ -15,7 +15,7 @@ def song_slug(path: str | Path, sha256: str, split: str | Split | None = None) -
 
     The name part keeps Unicode letters/digits (NFKD-folded to ASCII where that is lossless enough,
     e.g. "Beyoncé" -> "beyonce"), collapses everything else to single hyphens, and falls back to "song".
-    A split other than `all` adds `-split-<token>` (slice 13: one separation depth per folder), e.g.
+    A split other than `all` adds `-split-<token>` (one separation depth per folder), e.g.
     `black-cow-a5659ca7-split-v-dbo`; `all` keeps the plain name so existing folders stay valid.
     """
     stem = Path(path).stem
@@ -35,7 +35,7 @@ def _read(p: Path) -> dict:
 
 def recorded_split(folder: str | Path) -> Split | None:
     """The split a song folder records: `stems/.done.json` (a finished separation; one without a `split` field
-    predates slice 13 and is `all`), else `source.json` (written when separation starts). None when the folder
+    predates separation-depth support and is `all`), else `source.json` (written when separation starts). None when the folder
     records nothing."""
     folder = Path(folder)
     done = folder / "stems" / ".done.json"
@@ -69,5 +69,5 @@ def missing_folder_hint(folder: str | Path) -> str | None:
 
 
 def folder_split(folder: str | Path) -> Split:
-    """recorded_split, defaulting to `all` (folders from before slice 13, or folders made by hand)."""
+    """recorded_split, defaulting to `all` (folders from before separation-depth support, or folders made by hand)."""
     return recorded_split(folder) or ALL

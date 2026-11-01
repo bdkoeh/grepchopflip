@@ -1,7 +1,7 @@
 """The one list of choppers, shared by `gcf chop` and `gcf run`. Imports are lazy so `gcf --help` stays fast
 and the core never imports the extras.
 
-Slice 13: the stems to chop follow the song folder's split. An isolated stem keeps its own chopper (drums:
+The stems to chop follow the song folder's split. An isolated stem keeps its own chopper (drums:
 one-shots per part + loops, bass: notes + loops, other: melodic loops + phrases, vocals: phrases); a combined
 group (`inst`, `vocals+bass+other`, `mix`, ...) gets loops and phrases by the melodic algorithm. When drums are
 not isolated, the grid-only step runs first and writes `chops/grid.json` from the hidden drum parts, so every

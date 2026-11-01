@@ -29,7 +29,7 @@ ONESHOT_WINDOW_S = 0.35
 POOL_SEGMENTS = 48
 MAX_DURATION_RATIO = 1.1
 DEFAULT_THRESHOLD_DB = 5.0
-# Per-class thresholds in dB, tuned on the three test tracks (VERIFICATION.md, slice 7). Noisy metal (hats,
+# Per-class thresholds in dB, tuned on the three test tracks (enrichment verification). Noisy metal (hats,
 # cymbals) differs by ~5 dB between bins even for hits that sound alike, so it gets a wider threshold.
 THRESHOLDS_DB: dict[str, float] = {
     "Kick": 4.5, "Snare": 4.5, "Tom": 5.0, "Perc": 5.0,
@@ -39,7 +39,7 @@ THRESHOLDS_DB: dict[str, float] = {
 }
 
 
-#: slice 13: loops and phrases of combined groups (InstLoop, Inst, VoxBassLoop, MixLoop, ...) are mixed tonal
+#: separation depth: loops and phrases of combined groups (InstLoop, Inst, VoxBassLoop, MixLoop, ...) are mixed tonal
 #: material like MelLoop/Mel, so they share its threshold until the owner's ear says otherwise
 COMBINED_THRESHOLD_DB = 6.0
 

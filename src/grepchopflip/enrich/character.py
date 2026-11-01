@@ -37,7 +37,7 @@ MIN_WORDS = 4
 NO_DURATION_WORDS = ("DrumLoop", "BassLoop", "MelLoop")
 
 # log10 of the weighted mid-band (bark 7-14) loudness used in place of the Zwicker computation. Chosen so
-# the median drum one-shot of the three test tracks lands near 50 (see VERIFICATION.md, slice 7).
+# the median drum one-shot of the three test tracks lands near 50 (measured during enrichment verification).
 MIDBAND_REF = 1.96
 
 

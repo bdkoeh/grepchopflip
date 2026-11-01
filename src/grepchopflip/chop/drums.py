@@ -1,7 +1,7 @@
 """Drum chopper: one-shots per kit part and 1/2/4-bar loops from the full drum stem.
 
 Inputs (in `out_dir`): `stems/drums/<part>.wav`, `stems/drums.wav`, `analysis.json`.
-Outputs (paths in chops.json are relative to `out_dir`, D-048; layout provisional until slice 6):
+Outputs (paths in chops.json are relative to `out_dir`, D-048; working layout before organization):
     chops/drums/oneshots/<part>/<part>_NNNN.wav    clean hits, mono when L/R are correlated, peak -1 dBFS
     chops/drums/review/<part>/<part>_NNNN.wav      the same, but flagged needs_review
     chops/drums/loops/drumloop_<bars>bar_NNN.wav   bar-grid windows of the full stem, stereo, level untouched
@@ -618,7 +618,7 @@ def chop_drums(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> 
     return _summarize(common.read_chops_json(chops_json), out_dir, False, loops_skipped)
 
 
-# ----------------------------------------------------------------------------- grid only (slice 13)
+# ----------------------------------------------------------------------------- grid only
 
 GRID_STAGE_DIR = ".grid"        # chops/.grid/.done.json: the grid-only step's cache record
 

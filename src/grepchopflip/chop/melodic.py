@@ -96,7 +96,7 @@ def harmony_changes(beat_chroma: np.ndarray, active: np.ndarray, thresh: float =
 
 @locked_song
 def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False) -> dict:
-    """`stems/other.wav` -> chops/melodic/{loops,phrases} (unchanged by slice 13: same ids, paths, fingerprint)."""
+    """`stems/other.wav` -> chops/melodic/{loops,phrases} (preserved for combined-group support: same ids, paths, fingerprint)."""
     return chop_loops_phrases(out_dir, "other", folder="melodic", loop_prefix="melloop", phrase_prefix="phrase",
                               stage="chop.melodic", sensitivity=sensitivity, force=force)
 
@@ -108,7 +108,7 @@ def group_tag(group: str) -> str:
 
 @locked_song
 def chop_group(out_dir: Path, group: str, *, sensitivity: float = 0.5, force: bool = False) -> dict:
-    """Slice 13: loops and phrases (the melodic algorithm) for a combined group or `mix` (`stems/<group>.wav`
+    """Separation depth: loops and phrases (the melodic algorithm) for a combined group or `mix` (`stems/<group>.wav`
     -> chops/<group>/{loops,phrases}, ids `<tag>loop_<n>bar_NNN` / `<tag>phrase_NNNN`). No one-shots (D-054)."""
     tag = group_tag(group)
     return chop_loops_phrases(out_dir, group, folder=group, loop_prefix=f"{tag}loop", phrase_prefix=f"{tag}phrase",

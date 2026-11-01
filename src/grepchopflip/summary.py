@@ -6,7 +6,7 @@ Summary shape (stable keys; values may be null):
     {
       "gcf_version": "...", "status": "ok|partial|failed|nothing|dry_run", "exit_code": 0,
       "input": "<path given>", "out_dir": "<song folder>",
-      "split": "vocals,drums+bass+other" | null, "groups": ["vocals", "inst"] | null,     (slice 13)
+      "split": "vocals,drums+bass+other" | null, "groups": ["vocals", "inst"] | null,
       "index": "<song folder>/index.json" | null,
       "samples": 898, "review": 120,
       "counts": {"class": {"Kick": 40, ...}, "kind": {"oneshot": 700, ...}, "folder": {"oneshots/kick": 30, ...}},
@@ -102,7 +102,7 @@ def build(*, input_path: str | None, out_dir: Path | None, stages: dict[str, dic
         "exit_code": exit_code,
         "input": input_path,
         "out_dir": str(out_dir) if out_dir else None,
-        "split": split,            # slice 13: canonical --split of the song folder (null when unknown)
+        "split": split,            # separation depth: canonical --split of the song folder (null when unknown)
         "groups": groups,          # its stems, e.g. ["vocals", "inst"]
         "index": str(Path(out_dir) / INDEX_NAME) if index is not None and out_dir else None,
         "samples": len(rows),

@@ -92,7 +92,7 @@ def make_song(root: Path, with_words: bool = True, drop: tuple[str, ...] = ()) -
 
 
 def make_split_song(root: Path, split: str = "vocals", many_loops: int = 2) -> Path:
-    """Slice 13: a song folder of a non-default split. Every combined group gets loops (1, 2 and 4 bars) and
+    """Separation depth: a song folder of a non-default split. Every combined group gets loops (1, 2 and 4 bars) and
     phrases; isolated vocals a phrase; source.json and stems/.done.json record the split."""
     from grepchopflip.chop.melodic import group_tag
     from grepchopflip.split import parse_split

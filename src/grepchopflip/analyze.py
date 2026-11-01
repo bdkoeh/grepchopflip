@@ -23,9 +23,9 @@ from grepchopflip.models import BEAT_THIS_SHA256
 from grepchopflip.paths import folder_split, missing_folder_hint, song_slug
 
 ANALYSIS_FILE = "analysis.json"
-DONE_FILE = "analysis_done.json"  # distinct from slice 2's stems/.done.json
+DONE_FILE = "analysis_done.json"  # distinct from separation's stems/.done.json
 SCHEMA_VERSION = 1
-HARMONIC_STEMS = ("bass", "other", "vocals")      # members the key stems must cover (slice 13: see key_stems)
+HARMONIC_STEMS = ("bass", "other", "vocals")      # members the key stems must cover (separation depth: see key_stems)
 _SOURCE_KEYS = ("path", "source_path", "file", "input", "audio", "original")
 _AUDIO_EXT = {".wav", ".flac", ".ogg", ".mp3", ".m4a", ".aiff", ".aif", ".opus", ".aac"}
 
@@ -97,7 +97,7 @@ def _loudness(y: np.ndarray) -> dict:
 
 def _resolve_inputs(audio_or_out: Path | str, out_dir: Path | str | None, library: Path | str | None = None):
     """Return (out_dir, mix_paths, stems, split). mix_paths: files whose sum is the full mix; stems: the folder's
-    group stems that exist (names follow the folder's recorded split, slice 13)."""
+    group stems that exist (names follow the folder's recorded split)."""
     p = Path(audio_or_out)
     if p.is_dir():
         out = Path(out_dir) if out_dir else p

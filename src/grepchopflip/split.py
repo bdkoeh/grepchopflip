@@ -1,4 +1,4 @@
-"""Separation depth (slice 13, D-054 r2): which of the four separated stems stay apart and which are combined.
+"""Separation depth (D-054 r2): which of the four separated stems stay apart and which are combined.
 
 Pure: no audio, no files. Every other module asks this one for group names, class codes and the folder token.
 
@@ -8,7 +8,7 @@ Grammar (case-insensitive, spaces ignored):
     group  := "rest" | member ("+" member)*
     member := vocals | drums | bass | other
 
-- `all` (default): the four stems apart, as before slice 13. `none`: one group of the whole record (`mix`).
+- `all` (default): the four stems apart, as before separation-depth support. `none`: one group of the whole record (`mix`).
 - `rest` = every member not named elsewhere, as one group. Members named nowhere form that group implicitly, so
   `vocals` means `vocals,rest`.
 - Canonical form: members inside a group in the order vocals, drums, bass, other; groups ordered by their

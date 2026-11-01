@@ -1,4 +1,4 @@
-"""Slice 12: layering partners, which loops and phrases of one song fit on top of each other (D-053 r2, D-057).
+"""Layering partners, which loops and phrases of one song fit on top of each other (D-053 r2, D-057).
 
 Pure: reads only index rows and the bar grid from `analysis`, so it needs no audio and no cache; `make_index`
 recomputes it on every `gcf organize` / `gcf index` / `gcf run`.

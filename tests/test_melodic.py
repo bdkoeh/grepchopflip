@@ -88,9 +88,9 @@ def test_uncertain_grid_notes_melodic_loops_and_phrases_without_review(tmp_path)
         assert c["extra"]["grid_notes"] == ["grid_source=normalized_half", "grid_consistency=0.55"]
 
 
-def test_melodic_fingerprint_unchanged_by_the_slice13_refactor(tmp_path):
+def test_melodic_fingerprint_unchanged_by_combined_group_support(tmp_path):
     # value produced by main @ dec7d6b (before chop_loops_phrases was factored out) on this exact fixture;
-    # chops.json and all 23 WAVs were also byte-identical between the two (VERIFICATION.md, slice 13)
+    # chops.json and all 23 WAVs were also byte-identical between the two (combined-group verification)
     root = write_job(tmp_path, {"other": _other()}, SECONDS)
     chop_melodic(root, force=True)
     doc = json.loads((root / "chops/melodic/chops.json").read_text())

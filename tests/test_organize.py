@@ -450,7 +450,7 @@ def test_bass_review_reason_reaches_index_json(song):
     assert s["path"].startswith("review/")
 
 
-# ---------------------------------------------------------------- slice 13: combined groups
+# ---------------------------------------------------------------- separation depth: combined groups
 
 
 def _organized(tmp_path, split):
@@ -481,7 +481,7 @@ def test_vocals_out_gives_inst_loops_and_phrases_next_to_vocal_phrases(tmp_path)
     assert doc["stages"]["separate"]["done"] is True
     assert validate_index_file(s)["valid"] is True
     assert CliRunner().invoke(app, ["index", str(s), "--validate"]).exit_code == 0
-    # slice 12 partners work across groups: a 2-bar inst loop and the 2-bar vocal phrase of the same length
+    # layering partners work across groups: a 2-bar inst loop and the 2-bar vocal phrase of the same length
     inst2 = next(x for x in doc["samples"] if x["class"] == "InstLoop" and x["bars"] == 2 and not x["needs_review"])
     vox = next(x for x in doc["samples"] if x["class"] == "Vox")
     assert vox["id"] in {e["id"] for c in inst2["layers_with"].values() for e in c}
@@ -536,7 +536,7 @@ def test_unknown_stem_or_class_fails_validation_and_old_indexes_still_validate(s
     bad = json.loads(json.dumps(doc))
     bad["separation"]["method"] = "model"
     assert schema_errors(bad)
-    # 1.2 without `separation` (written before slice 13), 1.1 and 1.0 shapes all still validate
+    # 1.2 without `separation` (written before separation-depth support), 1.1 and 1.0 shapes all still validate
     old = json.loads(json.dumps(doc))
     del old["separation"]
     assert not schema_errors(old)

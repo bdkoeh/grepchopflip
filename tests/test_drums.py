@@ -367,7 +367,7 @@ def test_cli_partial_failure_exit_10(out_dir, monkeypatch):
 
 
 def test_grid_only_step_writes_the_same_grid_json_as_a_full_split(tmp_path):
-    """Slice 13 golden test: drum parts hidden in stems/.grid/ give byte-identical chops/grid.json, and nothing
+    """separation depth golden test: drum parts hidden in stems/.grid/ give byte-identical chops/grid.json, and nothing
     else is written (no one-shots, no loops)."""
     import shutil
 

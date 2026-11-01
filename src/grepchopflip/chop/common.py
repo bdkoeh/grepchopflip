@@ -1,4 +1,4 @@
-"""Helpers shared by every chopper. Owned by the lead; slices 4 and 5 consume, extend via new modules.
+"""Helpers shared by every chopper. Used by drum and stem choppers; extend through new modules.
 
 Conventions
 - Audio arrays are float32, shape (n, channels) with channels 1 or 2, as soundfile returns them.

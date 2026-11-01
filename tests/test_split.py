@@ -1,4 +1,4 @@
-"""Slice 13: the --split grammar, canonical form, names, class codes and folder tokens (pure, no audio)."""
+"""Separation depth: the --split grammar, canonical form, names, class codes and folder tokens (pure, no audio)."""
 
 import json
 import re
@@ -156,7 +156,7 @@ def test_recorded_split(tmp_path):
     assert recorded_split(f).spec == "vocals+bass+other,drums"
     (f / "stems").mkdir()
     (f / "stems" / ".done.json").write_text(json.dumps({"params": {"pass1_model": "htdemucs_ft.yaml"}}))
-    assert recorded_split(f).is_all                    # a finished separation from before slice 13 is `all`
+    assert recorded_split(f).is_all                    # a finished separation from before separation-depth support is `all`
     (f / "stems" / ".done.json").write_text(json.dumps({"params": {}, "split": "none"}))
     assert recorded_split(f).is_none
 

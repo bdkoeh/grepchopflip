@@ -13,7 +13,7 @@ After `gcf enrich` (D-050) the board shows only the representative of each near-
 "+N" opens its group, "All" shows everything. Pads show character words; the filter box keeps pads whose
 words, class or name contain every typed word (e.g. "dark", "punchy kick").
 
-Layering partners (slice 12, D-057): playing a pad lights its partners from index.json `layers_with` (thick
+Layering partners (layering partners, D-057): playing a pad lights its partners from index.json `layers_with` (thick
 border = same bars, solid = same length, dashed with xN or /N = repeats); "Partners" (key A) keeps only them
 (a collapsed representative stays when a member of its group fits). Served and in Loop mode the board is
 polyphonic: the first loop is the clock, another pad starts on its next cycle, a partner's length is
@@ -75,7 +75,7 @@ const mode = document.getElementById('mode');
 let ctx = null, cur = null, curIdx = -1;           // Web Audio state
 const buffers = new Map();
 const served = location.protocol.startsWith('http');
-// slice 12 (D-057): id -> {{b: same bars, l: same length, r: [[id, N]] repeats into, h: [[id, N]] holds,
+// layering partners (D-057): id -> {{b: same bars, l: same length, r: [[id, N]] repeats into, h: [[id, N]] holds,
 // o: partners on other boards, ph: phrase pickup in beats}}; BEAT = seconds per beat
 const LAYERS = {layers};
 const BEAT = {beat};
@@ -310,7 +310,7 @@ def _index_rows(folder: Path) -> dict[str, dict]:
 
 
 def _layers_js(rows: dict[str, dict], doc: dict) -> tuple[str, float]:
-    """(JS object literal id -> partners on this board, seconds per beat) for the slice 12 highlight and lock.
+    """(JS object literal id -> partners on this board, seconds per beat) for partner highlighting and locking.
     An index older than 1.2 gets its partners computed in memory (grepchopflip.layers, when importable)."""
     import json
 
@@ -437,12 +437,12 @@ def build(folder: Path) -> Path:
     return out
 
 
-KIND_FOLDERS = ("oneshots", "loops", "phrases", "words", "review", "stems")      # organized tree (slice 6)
+KIND_FOLDERS = ("oneshots", "loops", "phrases", "words", "review", "stems")      # organized tree
 
 
 def _board_dir(root: Path, w: Path) -> Path | None:
     parts = w.relative_to(root).parts[:-1]
-    if any(p.startswith(".") for p in parts):  # hidden working files (stems/.grid drum parts, slice 13)
+    if any(p.startswith(".") for p in parts):  # hidden working files (stems/.grid drum parts, separation depth)
         return None
     for i, p in enumerate(parts):
         if p == "chops":                       # not organized yet: one board per folder directly under chops/

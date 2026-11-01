@@ -41,7 +41,7 @@ class FakeSep:
         self.output_dir = None
         self.model = None
         self.logger = logging.getLogger("fake-sep")
-        self.noise = False          # slice 13: distinct content per stem, so sums can be checked
+        self.noise = False          # separation depth: distinct content per stem, so sums can be checked
         self.subtype = "FLOAT"
 
     def load_model(self, model_filename):
@@ -245,7 +245,7 @@ def test_empty_audio_is_input_error(tmp_path):
         sep.separate(p, tmp_path / "o", device="cpu")
 
 
-# ---------- slice 13: separation depth ----------
+# ---------- separation depth: separation depth ----------
 
 from grepchopflip import split as splitmod  # noqa: E402
 

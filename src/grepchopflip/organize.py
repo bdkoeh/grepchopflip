@@ -1,4 +1,4 @@
-"""Slice 6: turn the chop stages' working folders into a browsable sample library and write index.json.
+"""Organization: turn the chop stages' working folders into a browsable sample library and write index.json.
 
 Layout written under the song folder (D-031, D-021): kind first, then instrument; material the chop stages
 flagged `needs_review` goes to the same subtree under `review/`.
@@ -116,7 +116,7 @@ def is_loop_class(cls: str) -> bool:
 
 
 def class_folder(cls: str, stem: str | None = None) -> str:
-    """Folder of a class (D-031). Combined groups (slice 13): `loops/<group>` and `phrases/<group>`."""
+    """Folder of a class (D-031). Combined groups: `loops/<group>` and `phrases/<group>`."""
     if cls in CLASS_FOLDER:
         return CLASS_FOLDER[cls]
     if stem and is_group_name(stem) and len(members_of(stem)) > 1:
@@ -202,7 +202,7 @@ def classify(c: dict) -> str:
     kind, stem = c.get("kind"), c.get("stem")
     group = _combined(stem)
     if group and kind in ("loop", "phrase"):
-        return class_code(group, kind)          # slice 13: InstLoop / Inst, VoxBassLoop / VoxBass, MixLoop / Mix
+        return class_code(group, kind)          # separation depth: InstLoop / Inst, VoxBassLoop / VoxBass, MixLoop / Mix
     if kind == "oneshot":
         if stem == "bass":
             return "Bass"
@@ -408,7 +408,7 @@ def sample_row(c: dict, f: dict, path: str, fi: dict, sid: str) -> dict:
         "crest_db": lv.crest_db, "lufs_i": lv.lufs_i, "lufs_measure": lv.lufs_measure,
         "fade_in_ms": c.get("fade_in_ms"), "fade_out_ms": c.get("fade_out_ms"),
         "zero_snapped": c.get("zero_snapped"),
-        **EMPTY_FIELDS, "tags": [],        # filled by `gcf enrich` (slice 7)
+        **EMPTY_FIELDS, "tags": [],        # filled by `gcf enrich`
         "source_file": c.get("source_file"), "source_sha256": c.get("source_sha256"), "sha256": fi["sha256"],
     }
 
@@ -451,7 +451,7 @@ def make_index(song: Path, ctx: Context, docs: dict[Path, dict], rows: list[dict
     src, ana = ctx.source, ctx.analysis
     rows = sorted(rows, key=lambda r: r["path"])
     _unique_ids(rows)
-    # slice 12: layering partners need unique ids; layers.attach adds them and `layers` (before `samples`)
+    # Layering partners need unique ids; layers.attach adds them and `layers` (before `samples`)
     return layers.attach({
         "schema_version": INDEX_SCHEMA_VERSION,
         "generator": {"name": "gcf", "version": __version__},
@@ -471,7 +471,7 @@ def make_index(song: Path, ctx: Context, docs: dict[Path, dict], rows: list[dict
             "warnings": [w for w in [grid_warning(ana)] if w],
         },
         "models": ana.get("models") or {},
-        # slice 13: what was separated (one split per song folder); stems in `samples` are these group names
+        # separation depth: what was separated (one split per song folder); stems in `samples` are these group names
         "separation": folder_split(song).describe(),
         "params": {"bit_depth": bit_depth, "normalize": "peak"},
         "stages": _stages(song, docs, organized, bit_depth, ctx),
@@ -486,7 +486,7 @@ _ONE_LINE = "\x00gcf-one-line-"      # placeholder prefix; json.dumps writes the
 
 def index_text(doc: dict) -> str:
     """index.json text: indent=2, except that each layering partner entry, each `bar_span` and each
-    `layers.spans` entry sits on one line (keeps dense songs' indexes small; slice 12)."""
+    `layers.spans` entry sits on one line (keeps dense songs' indexes small)."""
     parts: list[str] = []
 
     def one(v: object) -> str:

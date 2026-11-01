@@ -1,4 +1,4 @@
-"""Stem separation: full mix -> vocals/drums/bass/other (grouped by the split, slice 13) -> drum parts, cached.
+"""Stem separation: full mix -> vocals/drums/bass/other (grouped by the split) -> drum parts, cached.
 
 Everything human-facing goes to the logger (stderr and `<out>/gcf.log`); the return value is plain data.
 """
@@ -61,7 +61,7 @@ def _params(fast: bool, split: str | Split | None = None) -> dict[str, Any]:
 
     `device` is left out on purpose: cuda and cpu give equivalent stems, so switching device must not
     invalidate a cache. torch is recorded under versions only for the same reason. The split is a setting only
-    when it is not `all`, so folders separated before slice 13 stay cache hits.
+    when it is not `all`, so folders separated before separation-depth support stay cache hits.
     """
     p: dict[str, Any] = {
         "pass1_model": MODEL_FAST if fast else MODEL_DEFAULT,
@@ -258,7 +258,7 @@ def separate(
     library: str | Path | None = None,
     split: str | Split | None = None,
 ) -> dict:
-    """Separate `path` under `out_dir/stems` according to `split` (slice 13). Cached unless `force`.
+    """Separate `path` under `out_dir/stems` according to `split`. Cached unless `force`.
 
     `all` (default): 4 stems and 6 drum parts, as before. Other splits: the separated stems of a combined group
     are summed (float) into `stems/<group>.wav`; `none` copies the source to `stems/mix.wav`. The drum-part pass

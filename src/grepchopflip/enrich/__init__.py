@@ -1,4 +1,4 @@
-"""Slice 7: `gcf enrich <song_folder>` adds richer metadata to an organized song folder (index.json 1.0/1.1).
+"""Enrichment: `gcf enrich <song_folder>` adds richer metadata to an organized song folder (index.json 1.0/1.1).
 
 Core (no models): character words and 0-100 brightness/hardness (`character`), near-duplicate groups with one
 representative each (`dedup`, D-026/D-050), and `smpl`/`acid` chunks in every WAV (`wavchunks`, D-006).
@@ -282,7 +282,7 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
             and (not embed_on or _embedding_cache_valid(song, doc["samples"]))
             and all(org.file_sha256(song / r["path"]) == r["sha256"] for r in doc["samples"])):
         if doc.get("schema_version") != INDEX_SCHEMA_VERSION or not layers.has_layers(doc):
-            # an index written before slice 12: add its layering partners (write_index runs layers.attach)
+            # an index written before layering-partner support: add its layering partners (write_index runs layers.attach)
             doc["schema_version"] = INDEX_SCHEMA_VERSION
             org.write_index(song, doc)
         c = doc.get("counts") or counts(doc["samples"])
@@ -501,7 +501,7 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
     if licenses:
         models["licenses"] = licenses
     doc["models"] = models
-    doc["schema_version"] = INDEX_SCHEMA_VERSION    # write_index adds the layering partners (slice 12)
+    doc["schema_version"] = INDEX_SCHEMA_VERSION    # write_index adds the layering partners
     doc["counts"] = counts(rows)
     doc["enrichment"] = {
         "version": VERSION,

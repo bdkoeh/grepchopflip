@@ -1,4 +1,4 @@
-"""Slice 12: layering partners (D-053 r2, D-057). Golden partner lists on synthetic rows with known frame
+"""Layering partners (D-053 r2, D-057). Golden partner lists on synthetic rows with known frame
 lengths (no audio), the rule edges, stem-agnostic stems, schema 1.2, the validate checks, the one-line
 writer, enrich keeping the fields, and `gcf layers` (human and JSON)."""
 
@@ -293,7 +293,7 @@ def test_enrich_keeps_the_partner_fields(song, monkeypatch):
     assert after["layers"] == before["layers"]
     assert {x["id"]: x["layers_with"] for x in after["samples"]} == {x["id"]: x["layers_with"] for x in before["samples"]}
     assert validate_index_file(song)["valid"]
-    # an index written before slice 12 gains them on the next enrich
+    # an index written before layering-partner support gains them on the next enrich
     old = copy.deepcopy(after)
     old["schema_version"] = "1.1"
     del old["layers"]

@@ -278,8 +278,8 @@ def test_chord_key_output_fields():
     assert "second_best" in r["key_confidence_method"]
 
 
-def _slice2_folder(tmp_path):
-    """Folder as slice 2 leaves it: source.json with `path`, stems/*.wav."""
+def _separated_folder(tmp_path):
+    """Separated folder layout: source.json with `path`, stems/*.wav."""
     song, sr = drum_track(100.0, 12.0)
     chords, _ = chord_track(12.0)
     n = min(len(song), len(chords))
@@ -295,12 +295,12 @@ def _slice2_folder(tmp_path):
     return d, n, sr
 
 
-def test_slice2_style_folder_uses_stems_for_key_and_caches(tmp_path, monkeypatch):
+def test_separated_folder_uses_stems_for_key_and_caches(tmp_path, monkeypatch):
     from grepchopflip.analyze import analyze
 
     b, d_ = _grid(100.0, 20)
     _stub_tracker(monkeypatch, b, d_)
-    folder, n, sr = _slice2_folder(tmp_path)
+    folder, n, sr = _separated_folder(tmp_path)
     r = analyze(folder)
     assert r["key_source"] == "stems"
     assert (r["key"], r["mode"]) == ("A", "minor")
@@ -327,7 +327,7 @@ def test_cache_keys_are_relative_to_the_song_folder(tmp_path, monkeypatch):
 
     b, d_ = _grid(100.0, 20)
     _stub_tracker(monkeypatch, b, d_)
-    folder, n, sr = _slice2_folder(tmp_path)
+    folder, n, sr = _separated_folder(tmp_path)
     r1 = analyze(folder)
     done = json.loads((folder / "analysis_done.json").read_text())
     assert "stems/drums.wav" in done["inputs"] and str(tmp_path / "orig.wav") in done["inputs"]
@@ -349,7 +349,7 @@ def test_cache_state_is_read_only_and_matches_analyze(tmp_path, monkeypatch):
 
     b, d_ = _grid(100.0, 20)
     _stub_tracker(monkeypatch, b, d_)
-    folder, n, sr = _slice2_folder(tmp_path)
+    folder, n, sr = _separated_folder(tmp_path)
     before = sorted(p.name for p in folder.iterdir())
     assert cache_state(folder) == {"cached": False, "reason": "not analyzed yet"}
     assert sorted(p.name for p in folder.iterdir()) == before          # wrote nothing
@@ -360,12 +360,12 @@ def test_cache_state_is_read_only_and_matches_analyze(tmp_path, monkeypatch):
     assert cache_state(folder) == {"cached": False, "reason": "inputs or settings changed"}
 
 
-def test_slice2_folder_without_source_falls_back_to_stem_mix(tmp_path, monkeypatch):
+def test_separated_folder_without_source_falls_back_to_stem_mix(tmp_path, monkeypatch):
     from grepchopflip.analyze import analyze
 
     b, d_ = _grid(100.0, 20)
     _stub_tracker(monkeypatch, b, d_)
-    folder, n, sr = _slice2_folder(tmp_path)
+    folder, n, sr = _separated_folder(tmp_path)
     (folder / "source.json").unlink()
     r = analyze(folder)
     assert len(r["input"]["files"]) == 4
