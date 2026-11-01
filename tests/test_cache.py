@@ -12,7 +12,7 @@ def test_not_done_without_file(tmp_path):
 
 
 def test_mark_then_done(tmp_path):
-    out = tmp_path / "a.wav"
+    out = tmp_path / "a.txt"
     out.write_bytes(b"x")
     d = cache.mark_done(tmp_path, "abc", {"p": 1}, {"gcf": "1"}, extra={"seconds": {"pass1": 2.0}})
     assert d["versions"] == {"gcf": "1"}
@@ -21,7 +21,7 @@ def test_mark_then_done(tmp_path):
 
 
 def test_invalidated_by_input_params_outputs_or_force(tmp_path):
-    out = tmp_path / "a.wav"
+    out = tmp_path / "a.txt"
     out.write_bytes(b"x")
     cache.mark_done(tmp_path, "abc", {"p": 1})
     assert not cache.is_done(tmp_path, "different", {"p": 1}, [out])

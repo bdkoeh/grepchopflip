@@ -96,8 +96,9 @@ def test_separate_failure_still_runs_analyze_on_a_new_song(tmp_path, song, monke
     assert code == exitcodes.GPU
 
     ctx2 = pipeline.RunContext(input_path=new, out_dir=tmp_path / "lib" / "other", audio=None, duration_s=1.0)
-    _, code, st = run(ctx2)
-    assert st["analyze"] == "failed"
+    from grepchopflip.beats import AudioReadError
+    with pytest.raises(AudioReadError):
+        pipeline.stage_analyze(ctx2)
 
 
 def test_real_stage_analyze_reads_the_song_file_when_known(tmp_path, song, monkeypatch):
@@ -125,7 +126,7 @@ def test_force_without_source_audio_keeps_stems(tmp_path):
     ctx = ctx_for(tmp_path, force=True)
     for p in pipeline._stem_files(ctx.out_dir):
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(b"x")
+        sf.write(p, np.zeros((100, 2), np.float32), 44100)
     r = pipeline.stage_separate(ctx)
     assert r["cached"] is True and "--force cannot redo separation" in ctx.warnings[0]
     for p in pipeline._stem_files(ctx.out_dir)[:1]:
@@ -223,7 +224,9 @@ def test_enrich_slice7_contract(tmp_path, monkeypatch):
     ctx = ctx_for(tmp_path, tag=False, embed=None, device="cpu")
     res = pipeline.run_stages(ctx, pipefix.fake_stages(enrich=pipeline.stage_enrich))
     assert res.stages["enrich"]["status"] == "cached"
-    assert res.stages["enrich"]["details"] == {"samples": 3, "representatives": 2}
+    assert res.stages["enrich"]["details"]["samples"] == 3
+    assert res.stages["enrich"]["details"]["representatives"] == 2
+    assert res.stages["enrich"]["details"]["skipped"]["tag"] == "disabled by option"
     assert seen == {"song_dir": ctx.out_dir, "force": False, "tag": False, "embed": None, "device": "cpu"}
 
 
@@ -428,7 +431,7 @@ def test_plan_propagates_reruns_from_separate_and_chop_not_analyze(tmp_path, mon
     ctx = ctx_for(tmp_path)                       # audio None, all stems present -> separate skip
     for p in pipeline._stem_files(ctx.out_dir):
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(b"x")
+        sf.write(p, np.zeros((100, 2), np.float32), 44100)
     monkeypatch.setattr(pipeline, "enrich_available", lambda: False)
     monkeypatch.setattr(an, "cache_state", lambda *a, **k: {"cached": False, "reason": "inputs or settings changed"})
     monkeypatch.setattr(pipeline, "_chops_look_done", lambda f: True)
@@ -502,7 +505,10 @@ def test_internal_error_is_json_and_traceback_only_with_v(song, tmp_path, monkey
     code = pipeline.run_from_cli(_cli_args(song, tmp_path))
     cap = capsys.readouterr()
     doc = json.loads(cap.out)
-    assert code == exitcodes.NOTHING and doc["errors"] == [{"stage": "internal", "error": "ValueError: glue bug"}]
+    assert code == exitcodes.NOTHING
+    assert doc["errors"][0]["stage"] == "internal"
+    assert doc["errors"][0]["error"] == "ValueError: glue bug"
+    assert doc["errors"][0]["code"] == "nothing_produced"
     assert "Traceback" not in cap.err and "-v" in cap.err
     pipeline.run_from_cli(_cli_args(song, tmp_path, verbose=1))
     assert "Traceback" in capsys.readouterr().err

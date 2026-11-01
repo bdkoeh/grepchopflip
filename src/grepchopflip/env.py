@@ -51,6 +51,7 @@ class Info:
     cache_dir: str
     cached_models: list[str]
     problems: list[Problem]
+    discovery: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -120,8 +121,8 @@ def collect_info() -> Info:
                 problems.append(Problem(
                     "torch-cpu-only",
                     "The installed torch has no CUDA support.",
-                    "Reinstall from PyPI on Linux (the Linux wheel includes CUDA 13): "
-                    "uv tool install --reinstall grepchopflip",
+                    "Restore the locked Linux CUDA build. From the source checkout: uv sync --locked --no-dev --reinstall-package torch. "
+                    "Retain any desired --extra options; see docs/INSTALL.md.",
                 ))
             elif smi_name is None:
                 problems.append(Problem(
@@ -141,7 +142,8 @@ def collect_info() -> Info:
         gpu.vram_mib = smi_vram
         problems.append(Problem(
             "torch-missing", "torch is not installed.",
-            "uv tool install --reinstall grepchopflip",
+            "From the source checkout: uv sync --locked --no-dev --reinstall-package torch. "
+            "Retain any desired --extra options; see docs/INSTALL.md.",
         ))
 
     try:
@@ -176,6 +178,8 @@ def collect_info() -> Info:
             "sudo apt-get install ffmpeg",
         ))
 
+    from grepchopflip.discovery import collect_discovery
+
     return Info(
         gcf_version=__version__,
         python=sys.version.split()[0],
@@ -188,4 +192,5 @@ def collect_info() -> Info:
         cache_dir=str(cache_dir()),
         cached_models=_cached_models(),
         problems=problems,
+        discovery=collect_discovery(cuda_available=gpu.available),
     )

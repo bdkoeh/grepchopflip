@@ -116,15 +116,18 @@ def test_missing_output_is_a_cache_miss(fake, wav, tmp_path):
     assert sep.separate(wav, out, device="cpu")["cached"] is False
 
 
-def test_stale_outputs_never_survive_a_failed_rerun(fake, wav, tmp_path):
+def test_prior_outputs_survive_a_failed_replacement(fake, wav, tmp_path):
     out = tmp_path / "o"
     sep.separate(wav, out, device="cpu")
     assert (out / "stems" / "bass.wav").exists()
+    before = (out / "stems" / "bass.wav").read_bytes()
+    marker = (out / "stems" / ".done.json").read_bytes()
     fake.omit = {"bass"}  # the model "forgets" to write bass
     with pytest.raises(SeparationError, match="bass.wav"):
         sep.separate(wav, out, device="cpu", force=True)
-    assert not (out / "stems" / "bass.wav").exists()  # old file was removed, not left to pass for new
-    assert not (out / "stems" / ".done.json").exists()
+    assert (out / "stems" / "bass.wav").read_bytes() == before
+    assert (out / "stems" / ".done.json").read_bytes() == marker
+    assert not list(out.glob(".gcf-separate-*"))
 
 
 def test_default_out_dir_uses_slug(fake, wav, tmp_path, monkeypatch):
@@ -219,7 +222,9 @@ def test_cli_exit_codes(monkeypatch, wav, exc, code):
     monkeypatch.setattr(sep, "separate", boom)
     res = CliRunner().invoke(cli.app, ["separate", str(wav), "--json"])
     assert res.exit_code == code
-    assert res.stdout == ""
+    result = json.loads(res.stdout)
+    assert result["status"] == "failed" and result["exit_code"] == code
+    assert result["errors"][0]["message"] == "error: x"
 
 
 def test_cli_missing_input_exit_3_and_clean_stdout(tmp_path):
@@ -228,7 +233,9 @@ def test_cli_missing_input_exit_3_and_clean_stdout(tmp_path):
         capture_output=True, text=True,
     )
     assert proc.returncode == 3
-    assert proc.stdout == ""
+    result = json.loads(proc.stdout)
+    assert result["status"] == "failed" and result["exit_code"] == 3
+    assert result["errors"][0]["code"] == "input"
 
 
 def test_empty_audio_is_input_error(tmp_path):

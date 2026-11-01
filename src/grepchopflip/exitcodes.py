@@ -5,6 +5,7 @@
     3  input unreadable (missing file, not audio, empty)
     4  missing optional dependency (the message names the extra or package to install)
     5  model download or GPU failure
+    7  song busy (retry after the current operation finishes)
     6  nothing produced
    10  partial success (some stage failed, the rest finished; a rerun redoes only what failed)
 """
@@ -18,16 +19,21 @@ MISSING_DEP = 4
 GPU = 5
 MODEL = 5
 NOTHING = 6
+BUSY = 7
 PARTIAL = 10
 
 NAMES = {OK: "ok", USAGE: "usage", INPUT: "input", MISSING_DEP: "missing_dependency", GPU: "model_or_gpu",
-         NOTHING: "nothing_produced", PARTIAL: "partial"}
+         NOTHING: "nothing_produced", BUSY: "song_busy", PARTIAL: "partial"}
 
 
 def for_exception(exc: BaseException) -> int:
     """The code a stage failure maps to when it is the reason nothing was produced."""
     from grepchopflip.errors import InputError, MissingDependencyError, SeparationError
 
+    from grepchopflip.safety import BusyError
+
+    if isinstance(exc, BusyError):
+        return BUSY
     try:  # beats.AudioReadError is a RuntimeError subclass; check it before the generic RuntimeError rule
         from grepchopflip.beats import AudioReadError
     except Exception:  # pragma: no cover - beats needs numpy only, but stay defensive

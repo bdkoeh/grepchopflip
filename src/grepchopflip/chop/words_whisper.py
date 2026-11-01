@@ -7,6 +7,8 @@ CTranslate2 needs next to torch's own CUDA 13 runtime). Sung-word boundaries are
 
 from __future__ import annotations
 
+from grepchopflip.safety import locked_song
+
 import ctypes
 import glob
 import importlib.util
@@ -64,6 +66,7 @@ def preload_cuda_libs() -> list[str]:
     return loaded
 
 
+@locked_song
 def chop_words(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, model: str = MODEL) -> dict:
     job = runner.load_job(out_dir, "vocals", ["words"])
     if not available():

@@ -6,6 +6,8 @@ where the harmony changes (cosine distance between per-beat chroma means). Start
 
 from __future__ import annotations
 
+from grepchopflip.safety import locked_song
+
 import logging
 from pathlib import Path
 
@@ -92,6 +94,7 @@ def harmony_changes(beat_chroma: np.ndarray, active: np.ndarray, thresh: float =
     return out
 
 
+@locked_song
 def chop_melodic(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False) -> dict:
     """`stems/other.wav` -> chops/melodic/{loops,phrases} (unchanged by slice 13: same ids, paths, fingerprint)."""
     return chop_loops_phrases(out_dir, "other", folder="melodic", loop_prefix="melloop", phrase_prefix="phrase",
@@ -103,6 +106,7 @@ def group_tag(group: str) -> str:
     return group.replace("+", "")
 
 
+@locked_song
 def chop_group(out_dir: Path, group: str, *, sensitivity: float = 0.5, force: bool = False) -> dict:
     """Slice 13: loops and phrases (the melodic algorithm) for a combined group or `mix` (`stems/<group>.wav`
     -> chops/<group>/{loops,phrases}, ids `<tag>loop_<n>bar_NNN` / `<tag>phrase_NNNN`). No one-shots (D-054)."""
@@ -112,6 +116,7 @@ def chop_group(out_dir: Path, group: str, *, sensitivity: float = 0.5, force: bo
                               extra_params={"group": group})
 
 
+@locked_song
 def chop_loops_phrases(out_dir: Path, stem: str, *, folder: str, loop_prefix: str, phrase_prefix: str, stage: str,
                        sensitivity: float = 0.5, force: bool = False, extra_params: dict | None = None) -> dict:
     """1/2/4-bar loops cut on the (hit-corrected when chops/grid.json exists) downbeats, and phrases found by

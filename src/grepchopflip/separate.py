@@ -5,6 +5,9 @@ Everything human-facing goes to the logger (stderr and `<out>/gcf.log`); the ret
 
 from __future__ import annotations
 
+from grepchopflip.safety import song_lock, check_publication
+import tempfile
+
 import contextlib
 import logging
 import math
@@ -268,8 +271,15 @@ def separate(
     or split.SplitError (exit 2). Library output that would reach stdout is redirected to stderr, so callers
     can keep stdout for results.
     """
-    with contextlib.redirect_stdout(sys.stderr):
-        return _separate(Path(path), out_dir, fast, device, force, library, split)
+    path = Path(path)
+    # Resolve identity before taking the lock; probing reads only the source file.
+    if out_dir is None:
+        source = audio_io.probe(path)
+        requested = parse_split(split) if split is not None else None
+        out_dir = library_dir(library) / song_slug(path, source.sha256, requested)
+    with song_lock(out_dir), contextlib.redirect_stdout(sys.stderr):
+        check_publication(out_dir, "separate")
+        return _separate(path, out_dir, fast, device, force, library, split)
 
 
 def check_split(out_dir: Path, requested: Split | None) -> Split:
@@ -351,8 +361,8 @@ def _separate(path: Path, out_dir, fast: bool, device: str, force: bool, library
     log.addHandler(fh)
     log.setLevel(logging.INFO)
     sep = None
+    scratch = None
     try:
-        audio_io.write_source_json(out_dir, source, sp.record())
         stems_dir = out_dir / "stems"
         stems, parts = _stem_paths(out_dir, sp)
         params = _params(fast, sp)
@@ -366,9 +376,14 @@ def _separate(path: Path, out_dir, fast: bool, device: str, force: bool, library
 
         if force:
             log.info("--force: rerunning both passes")
-        cache.clear_done(stems_dir)
-        # Never leave outputs from an earlier run that this run might fail to overwrite.
-        _delete_files(outputs, "stale output before rerun")
+        # Build and validate in private scratch space; failed inference retains prior audio.
+        target_stems_dir = stems_dir
+        target_outputs = outputs
+        scratch = tempfile.TemporaryDirectory(prefix=".gcf-separate-", dir=out_dir)
+        work_dir = Path(scratch.name)
+        stems_dir = work_dir / "stems"
+        stems, parts = _stem_paths(work_dir, sp)
+        outputs = [*stems.values(), *parts.values()]
         p1dir = stems_dir if sp.is_all else stems_dir / PASS1_DIR
         if not sp.is_all:
             shutil.rmtree(p1dir, ignore_errors=True)
@@ -385,7 +400,7 @@ def _separate(path: Path, out_dir, fast: bool, device: str, force: bool, library
         sep = _make_separator(device, out_dir, fh)
         seconds: dict[str, Any] = {}
         pass1 = {n: p1dir / f"{n}.wav" for n in STEM_NAMES}
-        pd = parts_dir(out_dir, sp)
+        pd = parts_dir(work_dir, sp)
         composed: dict[str, Any] = {}
 
         with audio_io.readable_wav(path) as wav:
@@ -424,6 +439,10 @@ def _separate(path: Path, out_dir, fast: bool, device: str, force: bool, library
         for k, v in seconds.items():
             if "model_load_s" in v:
                 log.info("%s: load %.1fs, separate %.1fs", k, v["model_load_s"], v["separate_s"])
+        invalid = [(p.name, cache.artifact_problem(p)) for p in outputs]
+        invalid = [(name, reason) for name, reason in invalid if reason]
+        if invalid:
+            raise SeparationError(f"invalid separation output: {invalid}")
         fmt = sf.info(str(next(iter(stems.values()))))
         stems_format = {"sample_rate": fmt.samplerate, "channels": fmt.channels, "subtype": fmt.subtype}
         formats = {}
@@ -435,8 +454,15 @@ def _separate(path: Path, out_dir, fast: bool, device: str, force: bool, library
             "htdemucs" if fast else "htdemucs_ft": "MIT",
             "MDX23C-DrumSep": "undocumented",
         }
+        # No reader can enter while we publish. A killed publisher leaves no done
+        # marker, so a retry repairs the entire separation dependency chain.
+        cache.clear_done(target_stems_dir)
+        for generated, destination in zip(outputs, target_outputs):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(generated, destination)
+        audio_io.write_source_json(out_dir, source, sp.record())
         done = cache.mark_done(
-            stems_dir, source.sha256, params, _versions(),
+            target_stems_dir, source.sha256, params, _versions(),
             extra={"seconds": seconds, "gpu": gpu, "device": device, "models": models,
                    "stems_format": stems_format, "formats": formats, **sp.record(), "method": sp.method,
                    "drum_parts": "hidden" if sp.drum_parts_hidden else "stems/drums",
@@ -450,6 +476,8 @@ def _separate(path: Path, out_dir, fast: bool, device: str, force: bool, library
                 pass
         return _result(out_dir, source, done, False, time.perf_counter() - t_start, sp)
     finally:
+        if scratch is not None:
+            scratch.cleanup()
         if sep is not None:
             getattr(sep, "logger", logging.getLogger("grepchopflip.none")).removeHandler(fh)
         log.removeHandler(fh)

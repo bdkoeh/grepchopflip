@@ -79,6 +79,16 @@ class _GcfGroup(TyperGroup):
         except UsageError as e:
             self._json_usage(e)
             raise
+        except typer.Exit:
+            raise
+        except KeyboardInterrupt:
+            _fail(self._json_wanted, 130, "Interrupted; rerun without --force to reuse finished work.",
+                  ctx.invoked_subcommand or "cli")
+        except Exception as e:
+            from grepchopflip import exitcodes
+
+            _fail(self._json_wanted, exitcodes.for_exception(e), f"{type(e).__name__}: {e}",
+                  ctx.invoked_subcommand or "cli")
 
 
 app = typer.Typer(
@@ -101,6 +111,38 @@ EXIT_GPU = 5
 EXIT_MODEL = 5  # model download failure (same number as GPU problems, per slice 3 spec)
 EXIT_NOTHING = 6
 EXIT_PARTIAL = 10
+
+
+def _fail(as_json: bool, code: int, message: str, stage: str) -> None:
+    """One result for handled failures; the message comes from the exception/validation site."""
+    from grepchopflip import summary
+
+    err.print(message, highlight=False, markup=False)
+    if as_json:
+        print(summary.to_json(summary.failure(None, stage, message, code)), flush=True)
+    raise typer.Exit(code)
+
+
+def _json_result(doc: dict | list, code: int = 0, *, stage: str = "cli") -> None:
+    from grepchopflip import summary
+
+    result = summary.result(doc, code)
+    # Preserve historical `errors` dictionaries and `problems` lists; expose a uniform machine list
+    # alongside them rather than changing the meaning of an existing field.
+    issues = result.get("problems") or result.get("errors") or []
+    if isinstance(issues, dict):
+        result["error_details"] = [summary.error_record(stage, str(v), code, substep=k)
+                                   for k, v in issues.items()]
+    elif issues:
+        result["error_details"] = [summary.error_record(stage, str(p), code) for p in issues]
+    if stage == "enrich" and issues:
+        failed = [summary.error_record(stage, str(step.get("error", "failed")), code,
+                                       code="stage_failed", substep=name)
+                  for name, step in result.get("steps", {}).items()
+                  if isinstance(step, dict) and step.get("status") == "failed"]
+        if failed:
+            result["error_details"] = failed
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def _utf8_streams() -> None:
@@ -162,13 +204,17 @@ def main(
 def info(
     as_json: bool = typer.Option(False, "--json", help="Print the report as JSON on stdout."),
 ) -> None:
-    """Report GPU, torch, ffmpeg and cache status, with fixes for anything wrong."""
+    """Report capabilities, contracts, dependencies, GPU and model-cache evidence without inference."""
     from grepchopflip.env import collect_info
 
     report = collect_info()
 
+    codes = {p.code for p in report.problems}
+    code = (EXIT_MISSING_DEP if "torch-missing" in codes else EXIT_GPU if codes &
+            {"torch-cpu-only", "no-nvidia-driver", "cuda-unavailable", "driver-too-old", "no-sm120"}
+            else EXIT_OK)
     if as_json:
-        print(json.dumps(report.to_dict(), indent=2))
+        _json_result(report.to_dict(), code, stage="info")
     else:
         table = Table(title=f"gcf {report.gcf_version}", show_header=False, box=None, pad_edge=False)
         table.add_column(style="bold")
@@ -234,8 +280,7 @@ def separate(
         raise typer.Exit(EXIT_USAGE)
 
     if device not in ("cuda", "cpu"):
-        err.print(f"[red]![/] --device must be cuda or cpu, not {device!r}")
-        raise typer.Exit(EXIT_USAGE)
+        _fail(as_json, EXIT_USAGE, f"error: --device must be cuda or cpu, not {device!r}", 'separate')
     if split is not None:
         try:
             split = parse_split(split).spec
@@ -254,21 +299,18 @@ def separate(
     except SplitError as e:
         usage(str(e))
     except InputError as e:
-        err.print(f"[red]![/] {e}")
-        raise typer.Exit(EXIT_INPUT)
+        _fail(as_json, EXIT_INPUT, f"error: {e}", 'separate')
     except MissingDependencyError as e:
-        err.print(f"[red]![/] {e}")
-        raise typer.Exit(EXIT_MISSING_DEP)
+        _fail(as_json, EXIT_MISSING_DEP, f"error: {e}", 'separate')
     except SeparationError as e:
-        err.print(f"[red]![/] {e}")
-        raise typer.Exit(EXIT_GPU)
+        _fail(as_json, EXIT_GPU, f"error: {e}", 'separate')
     finally:
         pkg_log.removeHandler(handler)
 
     for w in result.get("warnings") or []:
         err.print(f"warning: {w}", highlight=False, markup=False)
     if as_json:
-        print(json.dumps(result, indent=2))
+        _json_result(result)
     else:
         s = result["seconds"]
         print("stems cached" if result["cached"] else "stems written")
@@ -299,14 +341,12 @@ def analyze(
 
     # Validate options before any heavy import or work.
     if bpm is not None and not (bpm > 0 and bpm < 1000):
-        err.print("error: --bpm must be a positive number (below 1000)", highlight=False, markup=False)
-        raise typer.Exit(EXIT_USAGE)
+        _fail(as_json, EXIT_USAGE, "error: --bpm must be a positive number (below 1000)", 'analyze')
     if key is not None:
         try:
             parse_key(key)
         except ValueError as e:
-            err.print(f"error: --key: {e}", highlight=False, markup=False)
-            raise typer.Exit(EXIT_USAGE)
+            _fail(as_json, EXIT_USAGE, f"error: --key: {e}", 'analyze')
 
     from grepchopflip.analyze import analyze as run_analyze
     from grepchopflip.beats import AudioReadError
@@ -317,15 +357,13 @@ def analyze(
             result = run_analyze(path, out_dir=out, bpm_override=bpm, key_override=key, force=force,
                                 library=library)
     except AudioReadError as e:
-        err.print(f"error: {e}", highlight=False, markup=False)
-        raise typer.Exit(EXIT_INPUT)
+        _fail(as_json, EXIT_INPUT, f"error: {e}", 'analyze')
     except RuntimeError as e:
         # ModelDownloadError, ModelLoadError, torch / CUDA errors (incl. out-of-memory)
-        err.print(f"error: {type(e).__name__}: {e}", highlight=False, markup=False)
-        raise typer.Exit(EXIT_MODEL)
+        _fail(as_json, EXIT_MODEL, f"error: {type(e).__name__}: {e}", 'analyze')
 
     if as_json:
-        print(json.dumps(result, indent=2))
+        _json_result(result)
         return
 
     bpm_v = result["bpm"]
@@ -359,7 +397,29 @@ def _extra_chopper(name: str):
     return chopper(name)
 
 
+def _song_command_lock(parameter: str, *, shared=False, shared_option=None):
+    """Hold a folder lock around multi-stage CLI work, including its result read."""
+    from functools import wraps
+    import inspect
+
+    def decorate(fn):
+        signature = inspect.signature(fn)
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            from grepchopflip.safety import song_lock
+            bound = signature.bind(*args, **kwargs)
+            folder = Path(bound.arguments[parameter]).expanduser()
+            if not folder.is_dir():
+                return fn(*args, **kwargs)  # original validation gives the useful error
+            read_only = shared or bool(shared_option and bound.arguments.get(shared_option))
+            with song_lock(folder, shared=read_only, create=False):
+                return fn(*args, **kwargs)
+        return wrapped
+    return decorate
+
+
 @app.command()
+@_song_command_lock("out_dir")
 def chop(
     out_dir: Path = typer.Argument(..., help="Output folder of `gcf separate` + `gcf analyze`."),
     stems: Optional[str] = typer.Option(
@@ -391,9 +451,7 @@ def chop(
 
         default = library_dir() / song_slug(out_dir, sha256_file(out_dir))
         hint = missing_folder_hint(default) or f"its default folder is {default}"
-        err.print(f"error: {out_dir} is a song file; `gcf chop` takes the song folder ({hint})",
-                  highlight=False, markup=False)
-        raise typer.Exit(EXIT_INPUT)
+        _fail(as_json, EXIT_INPUT, f"error: {out_dir} is a song file; `gcf chop` takes the song folder ({hint})", 'chop')
     sp = folder_split(out_dir)
     order = chop_order(sp)
     groups = [n for n in order if n != GRID_STEP]
@@ -402,25 +460,19 @@ def chop(
         wanted_stems = [s.strip() for s in stems.split(",") if s.strip()]
         bad = [s for s in wanted_stems if s not in groups]
         if not wanted_stems or bad:
-            err.print(f"error: --stems must be from this folder's stems: {', '.join(groups)} (split {sp.spec})"
-                      + (f" (got {', '.join(bad)})" if bad else ""), highlight=False, markup=False)
-            raise typer.Exit(EXIT_USAGE)
+            _fail(as_json, EXIT_USAGE, f"error: --stems must be from this folder's stems: {', '.join(groups)} (split {sp.spec})"
+                      + (f" (got {', '.join(bad)})" if bad else ""), 'chop')
     # the grid step first when drums are hidden: it gives every group its hit-corrected grid
     wanted = chop_steps(sp, out_dir, wanted_stems)
     extra_names = [s.strip() for s in extras.split(",") if s.strip()] if extras else []
     if [e for e in extra_names if e not in CHOP_EXTRAS]:
-        err.print(f"error: --extras takes {' and/or '.join(CHOP_EXTRAS)}", highlight=False, markup=False)
-        raise typer.Exit(EXIT_USAGE)
+        _fail(as_json, EXIT_USAGE, f"error: --extras takes {' and/or '.join(CHOP_EXTRAS)}", 'chop')
     if not (0.0 <= sensitivity <= 1.0):
-        err.print("error: --sensitivity must be between 0 and 1", highlight=False, markup=False)
-        raise typer.Exit(EXIT_USAGE)
+        _fail(as_json, EXIT_USAGE, "error: --sensitivity must be between 0 and 1", 'chop')
     if not (out_dir / "stems").is_dir() or not (out_dir / "analysis.json").is_file():
-        err.print(f"error: {out_dir} lacks stems/ or analysis.json; run `gcf separate` and `gcf analyze` first",
-                  highlight=False, markup=False)
-        raise typer.Exit(EXIT_INPUT)
+        _fail(as_json, EXIT_INPUT, f"error: {out_dir} lacks stems/ or analysis.json; run `gcf separate` and `gcf analyze` first", 'chop')
     if not wanted and not extra_names:
-        err.print("error: no stem files found to chop", highlight=False, markup=False)
-        raise typer.Exit(EXIT_INPUT)
+        _fail(as_json, EXIT_INPUT, "error: no stem files found to chop", 'chop')
 
     handler = RichHandler(console=err, show_path=False, show_time=False, markup=False)
     pkg_log = logging.getLogger("grepchopflip")
@@ -477,7 +529,7 @@ def chop(
         doc: dict = {"out_dir": str(out_dir), "stems": results, "skipped": skipped}
         if errors:
             doc["errors"] = errors
-        print(json.dumps(doc, indent=2))
+        _json_result(doc, code, stage="chop")
     else:
         _print_chop_results(results)
     if code:
@@ -523,21 +575,17 @@ def organize(
     from grepchopflip.errors import InputError
 
     if bit_depth not in (16, 24):
-        err.print("error: --bit-depth must be 16 or 24", highlight=False, markup=False)
-        raise typer.Exit(EXIT_USAGE)
+        _fail(as_json, EXIT_USAGE, "error: --bit-depth must be 16 or 24", 'organize')
     try:
         r = org.organize(song_dir, bit_depth=bit_depth, force=force)
     except org.PartialOrganize as e:
-        err.print(f"error: {e}; the chop records still point at the original files, run it again",
-                  highlight=False, markup=False)
-        raise typer.Exit(EXIT_PARTIAL)
+        _fail(as_json, EXIT_PARTIAL, f"error: {e}; the chop records still point at the original files, run it again", 'organize')
     except (InputError, OSError, sf.LibsndfileError) as e:
-        err.print(f"error: {e}", highlight=False, markup=False)
-        raise typer.Exit(EXIT_INPUT)
+        _fail(as_json, EXIT_INPUT, f"error: {e}", 'organize')
     for p in r["problems"]:
         err.print(f"error: {p}", highlight=False, markup=False)
     if as_json:
-        print(json.dumps(r, indent=2))
+        _json_result(r, EXIT_PARTIAL if r["problems"] else EXIT_OK, stage="organize")
     else:
         print(f"organize: {'cached' if r['cached'] else 'written'}  {r['samples']} samples "
               f"({r['review']} to review), {r['bit_depth']}-bit  {song_dir / r['index']}")
@@ -548,10 +596,12 @@ def organize(
 
 
 @app.command()
+@_song_command_lock("song_dir", shared_option="validate")
 def index(
     song_dir: Path = typer.Argument(..., help="Song folder."),
     validate: bool = typer.Option(False, "--validate", help="Check index.json against the schema and that every "
                                                             "path exists; exit 3 when it does not."),
+    deep: bool = typer.Option(False, "--deep", help="With --validate, decode every sample to check finite audio (slower)."),
     as_json: bool = typer.Option(False, "--json", help="Print the result as JSON on stdout."),
 ) -> None:
     """Rebuild index.json from the current records (no files move); --validate only checks it."""
@@ -561,13 +611,14 @@ def index(
     from grepchopflip.errors import InputError
     from grepchopflip.index_schema import validate_index_file
 
+    if deep and not validate:
+        _fail(as_json, EXIT_USAGE, "--deep requires --validate.", "index")
     result: dict = {}
     if not validate:
         try:
             result = org.rebuild_index(song_dir)
         except (InputError, OSError, sf.LibsndfileError) as e:
-            err.print(f"error: {e}", highlight=False, markup=False)
-            raise typer.Exit(EXIT_INPUT)
+            _fail(as_json, EXIT_INPUT, f"error: {e}", 'index')
         for p in result["problems"]:
             err.print(f"error: {p}", highlight=False, markup=False)
         if not as_json:
@@ -575,16 +626,27 @@ def index(
                   f"{song_dir / result['index']}")
         if result["problems"]:
             if as_json:
-                print(json.dumps(result, indent=2))
+                _json_result(result, EXIT_PARTIAL, stage="index")
             raise typer.Exit(EXIT_PARTIAL)
         if as_json:
-            print(json.dumps(result, indent=2))
+            _json_result(result)
         return
+    from grepchopflip import query
+    _query_call(query.check_publication, as_json, song_dir)
     v = validate_index_file(song_dir)
+    if deep and v["valid"]:
+        from grepchopflip.cache import artifact_problem
+        doc = org.read_json(song_dir / "index.json")
+        for row in doc["samples"]:
+            problem = artifact_problem(song_dir / row["path"], deep=True)
+            if problem:
+                v["problems"].append(f"{row['path']}: {problem}")
+        v["valid"] = not v["problems"]
+    v["audio_check"] = "decoded_finite_samples" if deep else "not_requested"
     for p in v["problems"]:
         err.print(f"error: {p}", highlight=False, markup=False)
     if as_json:
-        print(json.dumps(v, indent=2))
+        _json_result(v, EXIT_OK if v["valid"] else EXIT_INPUT, stage="index")
     else:
         print(f"index: {'valid' if v['valid'] else 'invalid'}  {v['samples']} samples")
     if not v["valid"]:
@@ -617,8 +679,7 @@ def enrich(
     from grepchopflip.models import ModelDownloadError
 
     if device not in ("cuda", "cpu"):
-        err.print(f"error: --device must be cuda or cpu, not {device!r}", highlight=False, markup=False)
-        raise typer.Exit(EXIT_USAGE)
+        _fail(as_json, EXIT_USAGE, f"error: --device must be cuda or cpu, not {device!r}", 'enrich')
     handler = RichHandler(console=err, show_path=False, show_time=False, markup=False)
     pkg_log = logging.getLogger("grepchopflip")
     pkg_log.addHandler(handler)
@@ -628,14 +689,11 @@ def enrich(
         with contextlib.redirect_stdout(sys.stderr):
             r = enr.enrich(song_dir, force=force, tag=tag, embed=embed, device=device)
     except org.PartialOrganize as e:
-        err.print(f"error: {e}; run `gcf enrich` again", highlight=False, markup=False)
-        raise typer.Exit(EXIT_PARTIAL)
+        _fail(as_json, EXIT_PARTIAL, f"error: {e}; run `gcf enrich` again", 'enrich')
     except ModelDownloadError as e:
-        err.print(f"error: {e}", highlight=False, markup=False)
-        raise typer.Exit(EXIT_MODEL)
+        _fail(as_json, EXIT_MODEL, f"error: {e}", 'enrich')
     except (InputError, OSError, sf.LibsndfileError, WavChunkError) as e:
-        err.print(f"error: {e}", highlight=False, markup=False)
-        raise typer.Exit(EXIT_INPUT)
+        _fail(as_json, EXIT_INPUT, f"error: {e}", 'enrich')
     finally:
         pkg_log.removeHandler(handler)
         pkg_log.setLevel(old_level)
@@ -644,7 +702,7 @@ def enrich(
     for p in r["problems"]:
         err.print(f"error: {p}", highlight=False, markup=False)
     if as_json:
-        print(json.dumps(r, indent=2))
+        _json_result(r, EXIT_PARTIAL if r["problems"] else EXIT_OK, stage="enrich")
         raise typer.Exit(EXIT_PARTIAL if r["problems"] else EXIT_OK)
     print(f"enrich: {'cached' if r['cached'] else 'written'}  {r['samples']} samples, {r['representatives']} "
           f"representatives ({r['review']} to review)  {song_dir / r['index']}")
@@ -666,11 +724,98 @@ def _span_text(bs: dict | None) -> str:
     return out
 
 
+def _query_call(fn, as_json: bool, *args, **kwargs):
+    from grepchopflip import query, summary
+
+    try:
+        return fn(*args, **kwargs)
+    except query.QueryError as exc:
+        err.print(f"error: {exc.message}", highlight=False, markup=False)
+        if as_json:
+            record = summary.error_record("query", exc.message, exc.exit_code, code=exc.code)
+            record["recovery"] = exc.recovery
+            print(json.dumps(summary.result({"errors": [record]}, exc.exit_code), indent=2))
+        raise typer.Exit(exc.exit_code)
+
+
 @app.command()
+def samples(
+    song_dir: Path = typer.Argument(..., help="Song folder with index.json."),
+    kind: Optional[str] = typer.Option(None, "--kind", help="Exact kind: oneshot, loop, phrase, word."),
+    sample_class: Optional[str] = typer.Option(None, "--class", help="Exact class, e.g. Kick or DrumLoop."),
+    stem: Optional[str] = typer.Option(None, "--stem", help="Exact stem/group name."),
+    bars: Optional[int] = typer.Option(None, "--bars", help="Exact whole-bar count."),
+    min_duration: Optional[float] = typer.Option(None, "--min-duration", help="Inclusive minimum seconds."),
+    max_duration: Optional[float] = typer.Option(None, "--max-duration", help="Inclusive maximum seconds."),
+    start: Optional[float] = typer.Option(None, "--start", help="Source interval start in seconds; half-open overlap."),
+    end: Optional[float] = typer.Option(None, "--end", help="Source interval end in seconds (exclusive)."),
+    review: str = typer.Option("exclude", "--review", help="exclude, include, only, unknown; missing is unknown."),
+    character: Optional[str] = typer.Option(None, "--character", help="Exact character word."),
+    tag: Optional[str] = typer.Option(None, "--tag", help="Exact tag; unavailable metadata never matches."),
+    group: Optional[str] = typer.Option(None, "--group", help="Exact dedup_group ID; use --all to include its alternatives."),
+    show_all: bool = typer.Option(False, "--all", help="Include duplicate alternatives."),
+    fields: Optional[str] = typer.Option(None, "--fields", help="Comma-separated compact metadata fields; id/path always included."),
+    limit: int = typer.Option(10, "--limit", help="Page size, 1–100."),
+    cursor: Optional[str] = typer.Option(None, "--cursor", help="Next cursor from the same query and revision."),
+    revision: Optional[str] = typer.Option(None, "--revision", help="Require this index revision."),
+    facets: bool = typer.Option(False, "--facets", help="Show available filter values and counts, up to 20 per field."),
+    sort: str = typer.Option("id", "--sort", help="Order by id, duration (seconds), or source (position in song)."),
+    descending: bool = typer.Option(False, "--descending", help="Reverse sort direction; unknown values stay last, ties use ID ascending."),
+    as_json: bool = typer.Option(False, "--json", help="Print structured result."),
+) -> None:
+    """Read a bounded sample list; defaults to representatives in ID order, not a quality ranking."""
+    from grepchopflip import query
+
+    result = _query_call(query.samples, as_json, song_dir, kind=kind, sample_class=sample_class, stem=stem,
+                         bars=bars, min_duration=min_duration, max_duration=max_duration, start=start, end=end,
+                         review=review, character=character, tag=tag, group=group, show_all=show_all,
+                         fields=None if fields is None else [x.strip() for x in fields.split(",")],
+                         limit=limit, cursor=cursor, revision=revision, facets=facets, sort=sort, descending=descending)
+    if as_json:
+        _json_result(result)
+    else:
+        print(f"samples: {result['count']} of {result['total']}  root: {result['song_root']}")
+        if sort != "id" or descending:
+            print(f"order: {result['policies']['sort']} {result['policies']['sort_direction']}; unknown last; ID ascending on ties")
+        for row in result["samples"]:
+            print(f"{row['id']}  {row['path']}")
+        if "facets" in result:
+            print("filter choices (other filters and policies apply; each field ignores its own filter):")
+            for field, facet in result["facets"]["fields"].items():
+                choices = ", ".join(f"{v['value']} ({v['count']})" for v in facet["values"]) or "none"
+                print(f"  {field}: {choices}; unknown={facet['unknown']}, empty={facet['empty']}, "
+                      f"omitted values={facet['omitted_values']}")
+        if result["next_cursor"]:
+            print(f"next cursor: {result['next_cursor']}")
+
+
+@app.command()
+def sample(
+    song_dir: Path = typer.Argument(..., help="Song folder with index.json."),
+    sample_id: str = typer.Option(..., "--id", help="ID returned by samples."),
+    revision: Optional[str] = typer.Option(None, "--revision", help="Require the selection's index revision."),
+    as_json: bool = typer.Option(False, "--json", help="Print structured result."),
+) -> None:
+    """Read one sample's metadata, excluding embeddings and its partner graph."""
+    from grepchopflip import query
+
+    result = _query_call(query.sample, as_json, song_dir, sample_id, revision=revision)
+    if as_json:
+        _json_result(result)
+    else:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+@app.command()
+@_song_command_lock("song_dir", shared=True)
 def layers(
     song_dir: Path = typer.Argument(..., help="Song folder with index.json."),
     for_id: Optional[str] = typer.Option(None, "--for", help="Show the partners of this sample id."),
     show_all: bool = typer.Option(False, "--all", help="Every sample, not only the representatives (D-050)."),
+    limit: int = typer.Option(10, "--limit", help="Partner page size, 1–100; requires --for."),
+    cursor: Optional[str] = typer.Option(None, "--cursor", help="Partner page cursor; requires --for."),
+    revision: Optional[str] = typer.Option(None, "--revision", help="Require this index revision; requires --for."),
+    review: str = typer.Option("include", "--review", help="Partner review policy: include, exclude, only, unknown."),
     as_json: bool = typer.Option(False, "--json", help="Print the result as JSON on stdout."),
 ) -> None:
     """Layering partners: loops and phrases whose lengths fit together (same bars, same length, or a whole
@@ -679,23 +824,16 @@ def layers(
     from grepchopflip.index_schema import INDEX_NAME
     from grepchopflip.organize import read_json
 
-    doc = read_json(song_dir / INDEX_NAME)
-    if not isinstance(doc.get("samples"), list):
-        err.print(f"error: no readable {INDEX_NAME} in {song_dir}; run `gcf organize` or `gcf index`",
-                  highlight=False, markup=False)
-        raise typer.Exit(EXIT_INPUT)
-    doc, computed = lay.ensure(doc)
-    if computed:
-        err.print(f"note: {INDEX_NAME} predates layers (schema {doc.get('schema_version')}); partners computed "
-                  "in memory; run `gcf index` to store them", highlight=False, markup=False)
     if for_id is not None:
-        r = lay.partners_of(doc, for_id, show_all)
-        if r is None:
-            err.print(f"error: no sample with id {for_id!r} in {INDEX_NAME}", highlight=False, markup=False)
-            raise typer.Exit(EXIT_INPUT)
+        from grepchopflip import query
+
+        r = _query_call(query.partners, as_json, song_dir, for_id, show_all=show_all,
+                        review=review, limit=limit, cursor=cursor, revision=revision)
+        computed = r["computed_in_memory"]
+        if computed:
+            err.print("note: index.json predates layers; partners computed in memory", markup=False)
         if as_json:
-            print(json.dumps({"song_dir": str(song_dir), "computed_in_memory": computed, **r}, indent=2,
-                             ensure_ascii=False))
+            _json_result({"song_dir": str(song_dir), "computed_in_memory": computed, **r})
             return
         mark = "  [review]" if r["needs_review"] else ""
         print(f"{r['id']}  {r['class']} {r['stem']}  {_span_text(r['bar_span'])}  {r['duration_s']:.3f} s{mark}")
@@ -716,13 +854,20 @@ def layers(
                       f"drift {e['drift_ms']:.2f} ms{rev}")
         if not r["partners"]:
             print("  no partners within the tolerance")
+        if r["next_cursor"]:
+            print(f"next cursor: {r['next_cursor']}")
         if r["hidden"]:
-            print(f"+{r['hidden']} near-duplicates hidden (--all shows them)")
+            print(f"+{r['hidden']} partners hidden by duplicate/review policies (--all / --review include)")
         return
-    o = lay.overview(doc, show_all)
+    if cursor is not None or revision is not None or limit != 10 or review != "include":
+        _fail(as_json, EXIT_USAGE, "Partner query options require --for SAMPLE_ID.", "usage")
+    from grepchopflip import query
+    o = _query_call(query.overview, as_json, song_dir, show_all=show_all)
+    computed = o["computed_in_memory"]
+    if computed:
+        err.print("note: index.json predates layers; partners computed in memory", markup=False)
     if as_json:
-        print(json.dumps({"song_dir": str(song_dir), "computed_in_memory": computed, **o}, indent=2,
-                         ensure_ascii=False))
+        _json_result({"song_dir": str(song_dir), "computed_in_memory": computed, **o})
         return
     s = o["summary"]
     print(f"layers: {s['loops']} loops ({o['view']}), partners per loop median {s['partners_per_loop_median']}, "
@@ -762,16 +907,13 @@ def models_pull(
     extras = [e.strip() for x in (extra or []) for e in x.split(",") if e.strip()]
     bad = [e for e in extras if e not in models.EXTRA_MODELS]
     if bad:
-        err.print(f"error: --extra takes {' or '.join(models.EXTRA_MODELS)} (got {', '.join(bad)})",
-                  highlight=False, markup=False)
-        raise typer.Exit(EXIT_USAGE)
+        _fail(as_json, EXIT_USAGE, f"error: --extra takes {' or '.join(models.EXTRA_MODELS)} (got {', '.join(bad)})", 'models_pull')
     try:
         got = models.pull(extras, all_models=all_models)
     except models.ModelDownloadError as e:
-        err.print(f"error: {e}", highlight=False, markup=False)
-        raise typer.Exit(EXIT_MODEL)
+        _fail(as_json, EXIT_MODEL, f"error: {e}", 'models_pull')
     if as_json:
-        print(json.dumps(got, indent=2))
+        _json_result(got, stage="models.pull")
         return
     for m in got:
         print(f"{m['model']}: {'cached' if m['cached'] else 'downloaded'}  ({m['license']})  {m['path']}")

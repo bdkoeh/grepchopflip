@@ -15,6 +15,8 @@ Layouts (little endian):
 
 from __future__ import annotations
 
+from grepchopflip.safety import temporary_path
+
 import hashlib
 import os
 import struct
@@ -137,14 +139,10 @@ def write_chunks(path: Path, new: dict[bytes, bytes]) -> bool:
     out = b"RIFF" + struct.pack("<I", 4 + len(body)) + b"WAVE" + bytes(body)
     if out == blob:
         return False
-    tmp = path.with_name(path.name + TMP_SUFFIX)
-    try:
+    with temporary_path(path) as tmp:
         with open(tmp, "wb") as fh:
             fh.write(out)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
     return True

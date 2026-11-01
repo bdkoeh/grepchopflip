@@ -8,6 +8,8 @@ HF_TOKEN). gcf never installs or accepts anything for you; this extra only runs 
 
 from __future__ import annotations
 
+from grepchopflip.safety import locked_song
+
 import importlib.util
 import logging
 import sys
@@ -113,6 +115,7 @@ def run_model(wav: Path, model_size: str = MODEL) -> list[Note]:
     return notes
 
 
+@locked_song
 def chop_notes(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False, model: str = MODEL) -> dict:
     job = runner.load_job(out_dir, "other", ["phrases_notes"], folder="melodic")
     if not available():

@@ -15,3 +15,39 @@ test_tracks
 *.mp3
 *.flac
 *.m4a
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+.venv-*/
+
+# Editor, OS and temporary files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.tmp
+*.temp
+*.bak
+/tmp/
+/scratch/
+
+# Local test/build reports
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Downloaded model weights
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.safetensors
+
+# Local project planning and verification records
+/.planning/

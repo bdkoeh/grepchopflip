@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from grepchopflip.safety import locked_song
+
 import logging
 from pathlib import Path
 
@@ -68,6 +70,7 @@ def split_long(mono: np.ndarray, sr: int, s: float, e: float, max_dur: float = M
     return split_long(mono, sr, s, cut, max_dur) + split_long(mono, sr, cut, e, max_dur)
 
 
+@locked_song
 def chop_vocals(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False) -> dict:
     job = runner.load_job(out_dir, "vocals", ["phrases"])
     below = THRESHOLD_BELOW_LOUD_DB + (0.5 - float(np.clip(sensitivity, 0, 1))) * 10.0

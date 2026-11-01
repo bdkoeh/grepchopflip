@@ -19,6 +19,7 @@ import numpy as np
 
 from grepchopflip.chop.common import Chop, bar_loops, grid_notes, read_chops_json, write_chops_json
 from grepchopflip.errors import InputError
+from grepchopflip.cache import valid_audio
 
 log = logging.getLogger("grepchopflip.chop")
 
@@ -136,7 +137,7 @@ def cached_summary(job: Job, fp: str, force: bool, json_name: str = "chops.json"
         try:
             doc = read_chops_json(cj)
             if doc.get("params", {}).get("fingerprint") == fp and all(
-                (job.out_dir / c["path"]).is_file() for c in doc["chops"]
+                valid_audio(job.out_dir / c["path"]) for c in doc["chops"]
             ):
                 return summarize(job, doc["chops"], doc["params"], cached=True, json_name=json_name)
         except (OSError, ValueError, KeyError):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from grepchopflip.safety import song_lock, atomic_write, check_publication
+
 import hashlib
 import json
 import os
@@ -136,10 +138,7 @@ def key_stems(stems: dict[str, Path], sp) -> dict[str, Path]:
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
-
+    atomic_write(path, text)
 
 def _constants() -> dict:
     return {
@@ -198,10 +197,39 @@ def _cache_hit(ci: dict) -> bool:
         return False
     try:
         done = json.loads(done_path.read_text(encoding="utf-8"))
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        if not isinstance(done, dict) or not _valid_result(result):
+            return False
     except (OSError, ValueError):
         return False
     return done.get("input_key") == ci["input_key"] and done.get("params") == ci["params"]
 
+
+
+def _valid_result(result):
+    """Validate the structural beat/key contract before trusting a cache marker."""
+    import math
+    if not isinstance(result, dict) or result.get("schema_version") != SCHEMA_VERSION:
+        return False
+    required = {"bpm", "tempo_reliable", "beats_s", "downbeats_s", "beats_per_bar", "key", "mode", "input"}
+    if not required.issubset(result) or not isinstance(result["tempo_reliable"], bool):
+        return False
+    def number(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    if result["bpm"] is not None and (not number(result["bpm"]) or result["bpm"] <= 0):
+        return False
+    if not isinstance(result["beats_per_bar"], int) or isinstance(result["beats_per_bar"], bool) or result["beats_per_bar"] <= 0:
+        return False
+    inp = result["input"]
+    if not isinstance(inp, dict) or not number(inp.get("duration_s")) or inp["duration_s"] <= 0:
+        return False
+    for field in ("beats_s", "downbeats_s"):
+        grid = result[field]
+        if not isinstance(grid, list) or any(not number(v) or v < 0 or v > inp["duration_s"] + 0.01 for v in grid):
+            return False
+        if any(a >= b for a, b in zip(grid, grid[1:])):
+            return False
+    return True
 
 def cache_state(audio_or_out: Path | str, out_dir: Path | str | None = None, bpm_override: float | None = None,
                 key_override: str | None = None, library: Path | str | None = None) -> dict:
@@ -215,7 +243,7 @@ def cache_state(audio_or_out: Path | str, out_dir: Path | str | None = None, bpm
     return {"cached": False, "reason": "inputs or settings changed"}
 
 
-def analyze(
+def _analyze(
     audio_or_out: Path | str,
     out_dir: Path | str | None = None,
     bpm_override: float | None = None,
@@ -223,6 +251,7 @@ def analyze(
     force: bool = False,
     device: str | None = None,
     library: Path | str | None = None,
+    _preloaded_mix=None,
 ) -> dict:
     """Analyze a song (or an existing output folder) and write <out>/analysis.json.
 
@@ -244,7 +273,7 @@ def analyze(
             pass
 
     _log(f"Loading audio: {', '.join(p.name for p in mix_paths)}")
-    mix, sr = _mix(mix_paths)
+    mix, sr = _preloaded_mix if _preloaded_mix is not None else _mix(mix_paths)
     loud = {n: _loudness(load_mono(p)[0]) for n, p in stems.items()}
     out.mkdir(parents=True, exist_ok=True)  # only after the input has been read successfully
 
@@ -312,3 +341,13 @@ def analyze(
 
 
 __all__ = ["analyze", "AudioReadError", "NOTES"]
+
+
+def analyze(audio_or_out, out_dir=None, bpm_override=None, key_override=None,
+            force=False, device=None, library=None):
+    """Analyze under the same writer lock as full runs and other direct stages."""
+    out, mix_paths, _, _ = _resolve_inputs(audio_or_out, out_dir, library)
+    preloaded = _mix(mix_paths) if not out.exists() else None
+    with song_lock(out):
+        check_publication(out, "analyze")
+        return _analyze(audio_or_out, out_dir, bpm_override, key_override, force, device, library, preloaded)

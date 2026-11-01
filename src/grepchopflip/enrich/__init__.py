@@ -20,6 +20,8 @@ are unchanged.
 
 from __future__ import annotations
 
+from grepchopflip.safety import locked_song, temporary_path, begin_publication, finish_publication, PUBLICATION_MARKER, check_publication
+
 import hashlib
 import json
 import logging
@@ -226,6 +228,7 @@ def _apply_review_flags(song: Path, rows: list[dict], verdicts: dict[str, dict |
 
 # ----------------------------------------------------------------------------- main entry
 
+@locked_song
 def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embed: bool | None = None,
            device: str = "cuda", workers: int | None = None) -> dict:
     """Enrich one organized song folder; returns the summary `gcf enrich --json` prints.
@@ -247,6 +250,7 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
     song = Path(song_dir)
     if not song.is_dir():
         raise InputError(f"not a folder: {song}")
+    check_publication(song, "enrich")
     doc = org.read_json(song / INDEX_NAME)
     if not doc:
         raise InputError(f"no readable {INDEX_NAME} in {song}; run `gcf organize` first")
@@ -256,9 +260,10 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
         raise InputError(f"{song} is not organized yet; run `gcf organize` first")
     if not doc["samples"]:
         raise InputError(f"{INDEX_NAME} lists no samples")
-    missing = [r["path"] for r in doc["samples"] if not (song / r["path"]).is_file()]
+    from grepchopflip.cache import artifact_problem
+    missing = [r["path"] for r in doc["samples"] if artifact_problem(song / r["path"]) is not None]
     if missing:
-        raise InputError(f"{len(missing)} indexed file(s) missing (first: {missing[0]}); run `gcf index` first")
+        raise InputError(f"{len(missing)} indexed file(s) missing or invalid (first: {missing[0]}); rerun `gcf run` to repair the affected chops")
     for p in song.rglob("*" + wavchunks.TMP_SUFFIX):         # an interrupted chunk write
         p.unlink(missing_ok=True)
 
@@ -273,8 +278,8 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
 
     # ---- cached?
     st = doc.get("stages", {}).get("enrich") or {}
-    if (not force and st.get("done") and st.get("input_key") == _input_key(doc["samples"], opts)
-            and (not embed_on or (song / embed_clap.FILE).is_file())
+    if (not force and not (song / PUBLICATION_MARKER).exists() and st.get("done") and st.get("input_key") == _input_key(doc["samples"], opts)
+            and (not embed_on or _embedding_cache_valid(song, doc["samples"]))
             and all(org.file_sha256(song / r["path"]) == r["sha256"] for r in doc["samples"])):
         if doc.get("schema_version") != INDEX_SCHEMA_VERSION or not layers.has_layers(doc):
             # an index written before slice 12: add its layering partners (write_index runs layers.attach)
@@ -286,6 +291,9 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
                 "steps": st.get("steps", {}), "skipped": skipped, "problems": [],
                 "seconds": round(time.perf_counter() - t0, 2)}
 
+    recovery = ["gcf", "enrich", str(song.resolve()), "--json", "--device", device,
+                "--tag" if tag else "--no-tag", "--embed" if embed else "--no-embed"]
+    begin_publication(song, "enrich", recovery)
     state = {"version": VERSION, "features": {}, "tags": {}} if force else _read_state(song)
     rows = doc["samples"]
     digests = {r["path"]: wavchunks.audio_digest(song / r["path"]) for r in rows}
@@ -328,6 +336,7 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
             log.info("classifier: %d record(s) changed review status; re-placing them", flagged)
             old_by_id = {r["id"]: digests[r["path"]] for r in rows}
             org.organize(song, bit_depth=int(doc.get("params", {}).get("bit_depth") or 24))
+            begin_publication(song, "enrich", recovery)
             doc = org.read_json(song / INDEX_NAME)
             rows = doc["samples"]
             digests = {r["path"]: wavchunks.audio_digest(song / r["path"]) for r in rows}
@@ -426,7 +435,8 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
         if old_rows and not force and (song / embed_clap.FILE).is_file():
             try:
                 arr = np.load(song / embed_clap.FILE)
-                if arr.shape == (len(old_rows), embed_clap.DIM):
+                if (arr.shape == (len(old_rows), embed_clap.DIM)
+                        and np.issubdtype(arr.dtype, np.floating) and np.isfinite(arr).all()):
                     old = {d: arr[i] for i, d in enumerate(old_rows)}
             except (OSError, ValueError):
                 old = {}
@@ -456,9 +466,9 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
             except (OSError, ValueError):
                 same = False
         if not same:
-            tmp = out.with_name(out.name + ".tmp.npy")
-            np.save(tmp, mat)
-            os.replace(tmp, out)
+            with temporary_path(out, suffix=".npy") as tmp:
+                np.save(tmp, mat)
+                os.replace(tmp, out)
             org.write_json_if_changed(song / embed_clap.META, new_meta, indent=1)
         refs = [{"file": embed_clap.FILE, "row": i} for i in range(len(rows))]
         emb_models = CLAP.record()
@@ -525,7 +535,25 @@ def enrich(song_dir: Path, *, force: bool = False, tag: bool | None = None, embe
              "tags": {d: v for d, v in sorted(state["tags"].items()) if d in live_d}}
     org.write_json_if_changed(song / STATE_NAME, state, indent=0, sort_keys=True)
 
+    finish_publication(song)
     c = doc["counts"]
     return {"song_dir": str(song), "index": INDEX_NAME, "cached": False, "samples": c["total"],
             "representatives": c["representatives"], "review": c["review"], "counts": c, "steps": steps,
             "skipped": skipped, "problems": problems, "seconds": timings["total"], "timings": timings}
+
+
+def _embedding_cache_valid(song: Path, rows: list[dict]) -> bool:
+    """Validate the existing sidecar without model loading or inference."""
+    from grepchopflip.enrich import embed_clap
+    from grepchopflip.models import CLAP
+    try:
+        meta = json.loads((song / embed_clap.META).read_text(encoding="utf-8"))
+        matrix = np.load(song / embed_clap.FILE, mmap_mode="r", allow_pickle=False)
+        return (matrix.shape == (len(rows), embed_clap.DIM)
+                and np.issubdtype(matrix.dtype, np.floating)
+                and bool(np.isfinite(matrix).all())
+                and meta.get("model") == CLAP.repo and meta.get("revision") == CLAP.revision
+                and meta.get("paths") == [r["path"] for r in rows]
+                and len(meta.get("rows", [])) == len(rows))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from grepchopflip.safety import locked_song
+
 import logging
 from pathlib import Path
 
@@ -37,6 +39,7 @@ def slice_pitch(y: np.ndarray, a: int, b: int, sr: int) -> dict:
     return pitch_stats(y[a:end], sr, FMIN, FMAX, spread_range_s=(0.2 * length, 0.8 * length))
 
 
+@locked_song
 def chop_bass(out_dir: Path, *, sensitivity: float = 0.5, force: bool = False) -> dict:
     job = runner.load_job(out_dir, "bass", ["oneshots", "loops"])
     params = {"algo": ALGO, "sensitivity": sensitivity, "onset_delta": ONSET_DELTA,

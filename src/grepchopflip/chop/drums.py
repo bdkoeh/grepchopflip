@@ -46,6 +46,8 @@ the per-beat RMS in dB (windows split into bars*beats_per_bar equal segments): l
 
 from __future__ import annotations
 
+from grepchopflip.safety import locked_song, atomic_write
+
 import hashlib
 import json
 import logging
@@ -346,7 +348,7 @@ def _tier_list(tiers: dict[str, list[float]]) -> list[tuple[str, list[float]]]:
 
 def _write_grid(path: Path, grid: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(grid, indent=2) + "\n", encoding="utf-8")
+    atomic_write(path, json.dumps(grid, indent=2) + "\n")
 
 
 def _grid(analysis: dict, tiers: list[tuple[str, list[float]]]) -> dict:
@@ -502,6 +504,7 @@ def _summarize(doc: dict, out_dir: Path, cached: bool, loops_skipped: str | None
 
 # ----------------------------------------------------------------------------- entry point
 
+@locked_song
 def chop_drums(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> dict:
     out_dir = Path(out_dir)
     stems = out_dir / "stems"
@@ -532,7 +535,7 @@ def chop_drums(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> 
     outputs = [chops_json, *([grid_path] if make_loops else [])]
     if chops_json.is_file() and cache.is_done(base, input_key, settings, outputs, force):
         doc = common.read_chops_json(chops_json)
-        if all((out_dir / c["path"]).is_file() for c in doc["chops"]):
+        if all(cache.valid_audio(out_dir / c["path"]) for c in doc["chops"]):
             log.info("drum chops cached: %s", base)
             return _summarize(doc, out_dir, True, loops_skipped)
 
@@ -620,6 +623,7 @@ def chop_drums(out_dir: Path, sensitivity: float = 0.5, force: bool = False) -> 
 GRID_STAGE_DIR = ".grid"        # chops/.grid/.done.json: the grid-only step's cache record
 
 
+@locked_song
 def build_grid(out_dir: Path, sensitivity: float = 0.5, force: bool = False, parts_dir: Path | None = None) -> dict:
     """Grid-only drum step: when drums are inside a combined group (or the split is `none`), the drum parts
     live hidden in `stems/.grid/`. This finds their hits exactly as `chop_drums` does and writes only

@@ -18,6 +18,9 @@ Each sample is rewritten once with a short name (D-032) and an INFO chunk; its `
 
 from __future__ import annotations
 
+from grepchopflip.safety import locked_song, atomic_write as _atomic_write, begin_publication, finish_publication, PUBLICATION_MARKER, check_publication
+import uuid
+
 import hashlib
 import json
 import logging
@@ -58,13 +61,7 @@ class PartialOrganize(OSError):
 
 
 def atomic_write(p: Path, text: str) -> None:
-    tmp = p.with_name(p.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8", newline="") as fh:
-        fh.write(text)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, p)
-
+    _atomic_write(p, text)
 
 def _deletable(song: Path, rel: object) -> bool:
     """Only relative .wav paths under the organized tree (or an old chops/ source) that stay inside the song
@@ -77,13 +74,32 @@ def _deletable(song: Path, rel: object) -> bool:
     return song.resolve() in (song / rel).resolve().parents
 
 
+RECOVERY_NAME = ".gcf-organize-recovery.json"
+
+
 def _sweep_leftovers(song: Path) -> None:
-    """Undo an interrupted run: drop half-written files, put parked originals back."""
-    for suffix in (TMP_SUFFIX, CHUNK_TMP_SUFFIX):     # CHUNK_TMP_SUFFIX: an interrupted `gcf enrich` chunk write
+    """Recover records and parked audio together, or finish a committed publication."""
+    journal_path = song / RECOVERY_NAME
+    journal = read_json(journal_path)
+    if journal_path.exists() and (not isinstance(journal.get("records"), dict)
+                                  or not isinstance(journal.get("committed"), bool)):
+        raise InputError("invalid organize recovery journal; preserve it and inspect before retrying")
+    committed = journal.get("committed") is True
+    for suffix in (TMP_SUFFIX, CHUNK_TMP_SUFFIX):  # legacy fixed-name scratch files only
         for p in song.rglob("*" + suffix):
             p.unlink(missing_ok=True)
     for p in song.rglob("*" + OLD_SUFFIX):
-        os.replace(p, p.with_name(p.name[: -len(OLD_SUFFIX)]))
+        if committed:
+            p.unlink()
+        else:
+            os.replace(p, p.with_name(p.name[: -len(OLD_SUFFIX)]))
+    if journal and not committed:
+        for rel, text in journal.get("records", {}).items():
+            target = song / rel
+            if not target.resolve().is_relative_to(song.resolve()):
+                raise InputError("invalid organize recovery record path")
+            atomic_write(target, text)
+    journal_path.unlink(missing_ok=True)
 
 PART_CLASS = {"kick": "Kick", "snare": "Snare", "toms": "Tom", "hh": "Hat", "ride": "Ride", "crash": "Crash"}
 CLASS_FOLDER = {
@@ -520,9 +536,12 @@ def write_index(song: Path, doc: dict) -> bool:
     return write_text_if_changed(p, index_text(doc))
 
 
+@locked_song
 def rebuild_index(song_dir: Path) -> dict:
     """`gcf index`: rebuild index.json from the current records without moving or rewriting any audio."""
     song = Path(song_dir)
+    if (song / PUBLICATION_MARKER).exists():
+        raise InputError("An interrupted publication needs repair; retry the operation recorded in .gcf-publication.json before rebuilding the index")
     if not song.is_dir():
         raise InputError(f"not a folder: {song}")
     docs = load_docs(song)
@@ -564,6 +583,7 @@ def _prune_empty(root: Path, keep_root: bool) -> int:
     return n
 
 
+@locked_song
 def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
     t0 = time.perf_counter()
     song = Path(song_dir)
@@ -571,6 +591,7 @@ def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
         raise InputError(f"not a folder: {song}")
     if bit_depth not in (16, 24):
         raise InputError("bit depth must be 16 or 24")
+    check_publication(song, "organize")
     _sweep_leftovers(song)
     docs = load_docs(song)
     recs = load_records(docs)
@@ -615,7 +636,7 @@ def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
     try:
         for r, src, dst_rel, f in todo:
             dst = song / dst_rel
-            tmp = dst.with_name(dst.name + TMP_SUFFIX)
+            tmp = dst.with_name("." + dst.name + ".gcf-" + uuid.uuid4().hex)
             tmps.append(tmp)
             fi = write_clip(src, tmp, bit_depth, Path(dst_rel).stem, artist, _comment(r.chop, f))
             written.append((r, dst_rel, f, fi, tmp))
@@ -630,6 +651,10 @@ def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
     own = {dst: r.path for r, dst, *_ in written}
     parked = sorted(d for d in final_paths if d in live and own.get(d) != d and (song / d).is_file())
     replaced = 0
+    begin_publication(song, "organize", ["gcf", "organize", str(song.resolve()), "--bit-depth", str(bit_depth), "--json"])
+    journal = {"committed": False,
+               "records": {str(p.relative_to(song)): p.read_text(encoding="utf-8") for p in docs}}
+    atomic_write(song / RECOVERY_NAME, json.dumps(journal))
     try:
         for x in parked:
             os.replace(song / x, song / (x + OLD_SUFFIX))
@@ -675,6 +700,10 @@ def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
     state_changed = write_json_if_changed(song / STATE_NAME, new_state, indent=1, sort_keys=True)
     doc = make_index(song, ctx, docs, rows, organized=not problems, bit_depth=bit_depth)
     index_changed = write_index(song, doc)
+    # Once committed, recovery must retain the new records and audio; old sources
+    # may be deleted below. Before this point both records and parked audio roll back.
+    journal["committed"] = True
+    atomic_write(song / RECOVERY_NAME, json.dumps(journal))
 
     # only now delete: sources that moved, files no record points at any more, parked originals
     removed = 0
@@ -702,6 +731,8 @@ def organize(song_dir: Path, bit_depth: int = 24, force: bool = False) -> dict:
         k = str(Path(r["path"]).parent.as_posix())
         counts[k] = counts.get(k, 0) + 1
     did_work = bool(written or removed or changed_docs or index_changed or state_changed)
+    (song / RECOVERY_NAME).unlink(missing_ok=True)
+    finish_publication(song)
     return {
         "song_dir": str(song), "cached": not did_work, "samples": len(rows), "written": len(written),
         "reused": len(reused), "removed": removed, "records_updated": changed_docs, "folders_pruned": pruned,

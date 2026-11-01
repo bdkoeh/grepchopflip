@@ -145,7 +145,9 @@ def test_cli_unreadable_input_exits_3(tmp_path):
             capture_output=True, text=True,
         )
         assert proc.returncode == 3, proc.stderr
-        assert proc.stdout == ""
+        result = json.loads(proc.stdout)
+        assert result["status"] == "failed" and result["exit_code"] == 3
+        assert result["errors"][0]["code"] == "input"
         assert "error" in proc.stderr
     assert not (tmp_path / "o").exists()  # output folder is only created after the input was read
 
@@ -159,7 +161,9 @@ def test_cli_bad_options_exit_2(tmp_path, args):
         capture_output=True, text=True,
     )
     assert proc.returncode == 2, proc.stderr
-    assert proc.stdout == ""
+    result = json.loads(proc.stdout)
+    assert result["status"] == "failed" and result["exit_code"] == 2
+    assert result["errors"][0]["code"] == "usage"
 
 
 # ---------------------------------------------------------------- CPU tests with a stubbed tracker

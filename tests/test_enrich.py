@@ -270,6 +270,12 @@ def test_embeddings_sidecar_with_fake_model(song, monkeypatch):
     meta = json.loads((song / embed_clap.META).read_text())
     assert meta["model"] == models.CLAP.repo and meta["paths"] == [s["path"] for s in doc["samples"]]
     assert doc["models"]["licenses"][models.CLAP.repo] == "Apache-2.0"
+    assert enr.enrich(song, workers=1)["cached"] is True
+    (song / embed_clap.FILE).write_bytes(b"broken")
+    repaired = enr.enrich(song, workers=1)
+    assert repaired["cached"] is False and repaired["problems"] == []
+    assert np.load(song / embed_clap.FILE).shape == (16, 512)
+    assert enr.enrich(song, workers=1)["cached"] is True
 
 
 # ----------------------------------------------------------------------------- CLI
@@ -302,14 +308,14 @@ def test_models_pull(monkeypatch, tmp_path):
     monkeypatch.setattr(models, "ensure_file", fake_ensure)
     res = CliRunner().invoke(app, ["models", "pull", "--extra", "tag", "--json"])
     assert res.exit_code == 0, res.output
-    out = json.loads(res.stdout)
+    out = json.loads(res.stdout)["results"]
     assert [m["model"] for m in out] == [models.AST.repo] and out[0]["license"] == "BSD-3-Clause"
     assert all(f"/resolve/{models.AST.revision}/" in u for _, u, _ in calls)
     assert {n for n, _, _ in calls} == {"config.json", "preprocessor_config.json", "model.safetensors"}
     assert all(len(s) == 64 for _, _, s in calls)
     calls.clear()
     res = CliRunner().invoke(app, ["models", "pull", "--all", "--json"])
-    assert [m["model"] for m in json.loads(res.stdout)] == ["beat_this final0", models.AST.repo, models.CLAP.repo]
+    assert [m["model"] for m in json.loads(res.stdout)["results"]] == ["beat_this final0", models.AST.repo, models.CLAP.repo]
     assert CliRunner().invoke(app, ["models", "pull", "--extra", "words"]).exit_code == 2
 
 

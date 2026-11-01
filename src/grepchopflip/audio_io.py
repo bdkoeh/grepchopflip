@@ -8,6 +8,8 @@ else (MP3/M4A/OGG ...) is decoded by an ffmpeg subprocess into a temporary 32-bi
 
 from __future__ import annotations
 
+from grepchopflip.safety import atomic_write
+
 import hashlib
 import json
 import shutil
@@ -144,5 +146,5 @@ def write_source_json(out_dir: Path, info: SourceInfo, extra: dict | None = None
     """source.json: the input's facts, plus `extra` (slice 13: the canonical `split` and its `groups`)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     p = out_dir / "source.json"
-    p.write_text(json.dumps({**info.to_dict(), **(extra or {})}, indent=2) + "\n", encoding="utf-8")
+    atomic_write(p, json.dumps({**info.to_dict(), **(extra or {})}, indent=2) + "\n")
     return p

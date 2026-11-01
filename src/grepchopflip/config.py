@@ -182,7 +182,9 @@ class RunConfig:
         return self.values[key]
 
     def to_dict(self) -> dict:
-        return {"files": self.files, "sources": self.sources, "settings": self.settings}
+        return {"values": {k: str(v) if isinstance(v, Path) else v for k, v in self.values.items()},
+                "files": self.files, "sources": self.sources, "settings": self.settings,
+                "warnings": self.warnings}
 
 
 def config_files(song_dir: Path | None = None, cwd: Path | None = None, explicit: Path | None = None) -> list[Path]:

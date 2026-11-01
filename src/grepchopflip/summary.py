@@ -27,6 +27,41 @@ from pathlib import Path
 from grepchopflip import __version__
 from grepchopflip.index_schema import INDEX_NAME
 
+CONTRACT_VERSION = "1.0"
+
+
+def error_record(stage: str, message: str, exit_code: int, *, code: str | None = None,
+                 substep: str | None = None) -> dict:
+    """Stable machine category plus readable context; callers never need to parse the message."""
+    from grepchopflip.exitcodes import NAMES
+
+    category = code or NAMES.get(exit_code, "interrupted" if exit_code == 130 else "internal")
+    recovery = {
+        "song_busy": "Wait for the current song operation to finish, then retry without --force. A terminated process releases its lock automatically.",
+        "usage": "Correct the arguments or configuration, then retry.",
+        "input": "Check that the input exists and is readable, then retry.",
+        "missing_dependency": "Install the dependency named in the message, then retry.",
+        "model_or_gpu": "Check the model and device named in the message, then retry.",
+        "partial": "Inspect the failed stage or substep; rerun without --force to reuse successful work.",
+        "stage_failed": "Inspect the failed stage or substep; rerun without --force to reuse successful work.",
+        "interrupted": "Rerun without --force to reuse finished work.",
+    }.get(category)
+    return {"code": category, "stage": stage, "substep": substep, "message": message,
+            "error": message, "recovery": recovery}
+
+
+def result(doc: dict | list, exit_code: int = 0, *, status: str | None = None) -> dict:
+    """Version the CLI contract, preserving existing dictionary fields.
+
+    The former models-pull array is available as `results` in the versioned envelope.
+    """
+    out = dict(doc) if isinstance(doc, dict) else {"results": doc}
+    out.setdefault("contract_version", CONTRACT_VERSION)
+    out.setdefault("exit_code", exit_code)
+    out.setdefault("status", status or ("ok" if exit_code == 0 else "partial" if exit_code == 10
+                                       else "nothing" if exit_code == 6 else "failed"))
+    return out
+
 
 def read_index(out_dir: Path | None) -> dict | None:
     if out_dir is None:
@@ -62,6 +97,7 @@ def build(*, input_path: str | None, out_dir: Path | None, stages: dict[str, dic
         groups = list(parse_split(split).names)
     return {
         "gcf_version": __version__,
+        "contract_version": CONTRACT_VERSION,
         "status": status,
         "exit_code": exit_code,
         "input": input_path,
@@ -77,7 +113,9 @@ def build(*, input_path: str | None, out_dir: Path | None, stages: dict[str, dic
         "stages": stages,
         "seconds": seconds,
         "warnings": warnings,
-        "errors": errors,
+        "errors": [dict(error_record(e["stage"], e["error"], exit_code,
+                                    code=e.get("code") or "stage_failed", substep=e.get("substep")), **e)
+                   for e in errors],
         "config": config or {},
     }
 
@@ -86,7 +124,8 @@ def failure(input_path: str | None, stage: str, msg: str, code: int, out_dir: Pa
             stages: dict | None = None, warnings: list[str] | None = None, total_s: float = 0.0) -> dict:
     """The summary for a run that stopped before (or outside) the stages: usage, input, config, interrupt."""
     return build(input_path=input_path, out_dir=out_dir, stages=stages or {}, warnings=warnings or [],
-                 errors=[{"stage": stage, "error": msg}], exit_code=code, status="failed", total_s=total_s)
+                 errors=[error_record(stage, msg, code)], exit_code=code,
+                 status="partial" if code == 10 else "failed", total_s=total_s)
 
 
 def to_json(summary: dict, index: dict | None = None, full: bool = False) -> str:

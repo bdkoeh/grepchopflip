@@ -237,9 +237,10 @@ def test_failure_midway_strands_nothing_and_a_rerun_completes(tmp_path, monkeypa
     orig, calls = os.replace, {"n": 0}
 
     def flaky(a, b):
-        calls["n"] += 1
-        if calls["n"] == 3:
-            raise OSError("disk full")
+        if str(b).endswith(".wav"):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise OSError("disk full")
         return orig(a, b)
 
     monkeypatch.setattr(os, "replace", flaky)

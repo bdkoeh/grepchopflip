@@ -1,5 +1,9 @@
 # Grep Chop Flip: project context
 
+> Historical design brief (2026-10-24), retained for product intent. Later decisions supersede
+> its platform, dependency, command and schema sketches. For current use, start with
+> [INSTALL.md](INSTALL.md) and [AGENT_USAGE.md](AGENT_USAGE.md); do not execute the draft CLI below.
+
 Name: **Grep Chop Flip**. Package and repo: `grepchopflip`. Command: `gcf`. Chosen 2026-10-24;
 PyPI `grepchopflip` and `grep-chop-flip` and GitHub `grepchopflip` were free at that time
 (`gcf` on PyPI is an unrelated abandoned 2018 package, irrelevant since only the console

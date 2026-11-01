@@ -9,6 +9,8 @@ Conventions
 
 from __future__ import annotations
 
+from grepchopflip.safety import temporary_path, atomic_write
+
 import json
 import os
 from dataclasses import asdict, dataclass, field
@@ -30,9 +32,9 @@ def load_stem(path: Path) -> tuple[np.ndarray, int]:
 
 def write_chop(path: Path, y: np.ndarray, sr: int, subtype: str = "PCM_24") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp.wav")
-    sf.write(str(tmp), y, sr, subtype=subtype)
-    os.replace(tmp, path)
+    with temporary_path(path, suffix=".wav") as tmp:
+        sf.write(str(tmp), y, sr, subtype=subtype)
+        os.replace(tmp, path)
 
 
 # ----------------------------------------------------------------------------- edges and levels
@@ -249,9 +251,7 @@ def write_chops_json(path: Path, chops: list[Chop], params: dict, stage: str) ->
         "params": params,
         "chops": [asdict(c) for c in chops],
     }
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write(path, json.dumps(doc, indent=2))
 
 
 def read_chops_json(path: Path) -> dict:
