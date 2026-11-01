@@ -38,7 +38,7 @@ uv --version
 Clone the repository, then install the locked environment:
 
 ```bash
-git clone https://github.com/bob-koehler/grepchopflip.git
+git clone https://github.com/bdkoeh/grepchopflip.git
 cd grepchopflip
 uv sync --locked --no-dev
 source .venv/bin/activate

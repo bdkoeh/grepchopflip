@@ -44,7 +44,7 @@ Follow the [installation guide](docs/INSTALL.md) for system prerequisites, uv se
 source acquisition. Install the locked core environment:
 
 ```bash
-git clone https://github.com/bob-koehler/grepchopflip.git
+git clone https://github.com/bdkoeh/grepchopflip.git
 cd grepchopflip
 uv sync --locked --no-dev
 source .venv/bin/activate

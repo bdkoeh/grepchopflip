@@ -6,7 +6,7 @@ purpose is to extract sample material and provide compact, explainable access to
 A human still decides whether those samples sound useful.
 
 The source onboarding now gives an explicit install → discover → process → select →
-inspect → audition path. The source repository is [bob-koehler/grepchopflip](https://github.com/bob-koehler/grepchopflip).
+inspect → audition path. The source repository is [bdkoeh/grepchopflip](https://github.com/bdkoeh/grepchopflip).
 Source publication does not establish a fresh-machine install or a PyPI distribution.
 
 ## What the evidence establishes

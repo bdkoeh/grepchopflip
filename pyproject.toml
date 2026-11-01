@@ -54,7 +54,7 @@ embed = ["transformers>=5,<6"]
 gcf = "grepchopflip.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/bob-koehler/grepchopflip"
+Homepage = "https://github.com/bdkoeh/grepchopflip"
 
 [dependency-groups]
 dev = [
