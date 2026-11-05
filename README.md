@@ -137,7 +137,6 @@ The code license does not grant rights to source recordings or clear samples for
 - [Agent workflow](docs/AGENT_USAGE.md): selection, interpretation, retries and errors.
 - [Processing reference](docs/REFERENCE.md): configuration, enrichment and timing partners.
 - [Readiness](docs/READINESS.md): demonstrated behavior and remaining release gates.
-- [Contributor instructions](AGENTS.md): working on the project.
 
 For a bug report, include the code revision, `gcf info --json`, exact command, exit code,
 JSON result and relevant stderr. Redact private paths and credentials; recordings are not

@@ -51,3 +51,7 @@ coverage.xml
 
 # Local project planning and verification records
 /.planning/
+
+# Local agent instructions
+/AGENTS.md
+/CLAUDE.md
